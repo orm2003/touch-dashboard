@@ -1,19 +1,20 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime
-import ast
-from PIL import Image
 import os
+import ssl
+import ast
 import hashlib
 import urllib.request
-import ssl
+from datetime import datetime
 
-# -----------------------------------------------------------------------------
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+from PIL import Image
+
+# =============================================================================
 # Page config
-# -----------------------------------------------------------------------------
+# =============================================================================
 st.set_page_config(
     page_title="Touch Recommendation Dashboard",
     page_icon="📱",
@@ -21,9 +22,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Constants
-# -----------------------------------------------------------------------------
+# =============================================================================
 MONTH_NAMES = {
     1: "January", 2: "February", 3: "March", 4: "April",
     5: "May", 6: "June", 7: "July", 8: "August",
@@ -31,15 +32,15 @@ MONTH_NAMES = {
 }
 MONTH_ABBR = {m: MONTH_NAMES[m][:3] for m in MONTH_NAMES}
 
-PASSWORD = "msba@touch"  # simple app gate
+PASSWORD = "msba@touch"
 
 # Google Drive file configuration (parquet)
 GDRIVE_FILE_ID = "1cPFjQmRzuZhwq0Q1S4l8fihhWwHhIcQs"
 DATA_FILE_NAME = "data.parquet"
 
-# -----------------------------------------------------------------------------
-# Offer catalog (as you provided)
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Offer catalog (unchanged)
+# =============================================================================
 OFFER_CATALOG = {
     "Legacy HS Series": pd.DataFrame([
         {"Code": "HS1 POST", "Name": "HS1 Post", "Type": "Postpaid", "Data (MB)": 500, "Price ($)": 3.5, "Voice": 0},
@@ -127,9 +128,9 @@ OFFER_CATALOG = {
     ])
 }
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Helpers
-# -----------------------------------------------------------------------------
+# =============================================================================
 def normalize_offer_pattern(val):
     """Convert raw stored offer pattern to a clean list of offer strings."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -161,45 +162,35 @@ def normalize_offer_pattern(val):
         return cleaned
     return [str(val).strip()] if val else []
 
-# -----------------------------------------------------------------------------
-# Data loading (cloud)
-# -----------------------------------------------------------------------------
-@st.cache_data(persist=True, show_spinner=False)
-def download_from_gdrive() -> pd.DataFrame | None:
-    """Download parquet file from Google Drive (no external libs)."""
-    try:
-        if os.path.exists(DATA_FILE_NAME):
-            return pd.read_parquet(DATA_FILE_NAME)
-
-        download_url = f"https://drive.google.com/uc?export=download&id={GDRIVE_FILE_ID}"
-        with st.spinner("Downloading data file (one-time download, ~35MB)..."):
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            with urllib.request.urlopen(download_url, context=ssl_context) as response:
-                with open(DATA_FILE_NAME, 'wb') as out_file:
-                    out_file.write(response.read())
-
-        return pd.read_parquet(DATA_FILE_NAME)
-    except Exception as e:
-        st.error(f"Error downloading data: {str(e)}")
-        st.info("Ensure the Drive file is shared: Anyone with the link can view.")
-        return None
+# =============================================================================
+# Data loading (pure inside cache; NO st.* calls in cached functions)
+# =============================================================================
+def _download_gdrive_file(dst_path: str) -> None:
+    """Chunked download from Google Drive to local file (no Streamlit calls)."""
+    if os.path.exists(dst_path):
+        return
+    url = f"https://drive.google.com/uc?export=download&id={GDRIVE_FILE_ID}"
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(url, context=ctx, timeout=60) as r, open(dst_path, "wb") as out:
+        CHUNK = 1 << 14  # 16KB
+        while True:
+            b = r.read(CHUNK)
+            if not b:
+                break
+            out.write(b)
 
 @st.cache_data(persist=True, show_spinner=False)
 def load_data() -> pd.DataFrame | None:
     """Load + preprocess data for the app (uses Google Drive in cloud)."""
     try:
-        df = download_from_gdrive()
-        if df is None:
-            return None
+        _download_gdrive_file(DATA_FILE_NAME)
+        df = pd.read_parquet(DATA_FILE_NAME)
 
         # Memory optimization
-        categorical_columns = [
-            'Customer_Type', 'Liquidity_Persona', 'Consumption_Persona',
-            'Sub_Persona', 'Device_Category', 'DEVICE_MODEL'
-        ]
-        for col in categorical_columns:
+        for col in ['Customer_Type', 'Liquidity_Persona', 'Consumption_Persona',
+                    'Sub_Persona', 'Device_Category', 'DEVICE_MODEL']:
             if col in df.columns:
                 df[col] = df[col].astype('category')
 
@@ -211,33 +202,32 @@ def load_data() -> pd.DataFrame | None:
             df['MONTH'] = pd.to_numeric(df['MONTH'], errors='coerce').fillna(0).astype(int)
             df = df[df['MONTH'].between(1, 12)]
 
-        # Parse offer patterns
+        # Parse patterns
         if 'offer_pattern' in df.columns:
             df['offer_pattern_norm'] = df['offer_pattern'].apply(normalize_offer_pattern)
-            df['offer_pattern_str'] = df['offer_pattern_norm'].apply(lambda lst: ", ".join(lst) if lst else "None")
+            df['offer_pattern_str']  = df['offer_pattern_norm'].apply(lambda lst: ", ".join(lst) if lst else "None")
         else:
             df['offer_pattern_norm'] = [[] for _ in range(len(df))]
-            df['offer_pattern_str'] = "None"
+            df['offer_pattern_str']  = "None"
 
         if 'Recommended_Offer_Pattern' in df.columns:
             df['recommended_offers_norm'] = df['Recommended_Offer_Pattern'].apply(normalize_offer_pattern)
-            df['recommended_offers_str'] = df['recommended_offers_norm'].apply(lambda lst: ", ".join(lst) if lst else "None")
+            df['recommended_offers_str']  = df['recommended_offers_norm'].apply(lambda lst: ", ".join(lst) if lst else "None")
         else:
             df['recommended_offers_norm'] = [[] for _ in range(len(df))]
-            df['recommended_offers_str'] = "None"
+            df['recommended_offers_str']  = "None"
 
-        # Ensure Price_Difference exists
         if 'Price_Difference' not in df.columns:
             df['Price_Difference'] = 0.0
 
         return df
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
+    except Exception:
+        # Fail quietly; we handle UI messaging in main()
         return None
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Auth (simple)
-# -----------------------------------------------------------------------------
+# =============================================================================
 def check_password() -> bool:
     """Returns True if password is correct; otherwise shows login UI."""
     def password_entered():
@@ -283,29 +273,29 @@ def check_password() -> bool:
     else:
         return True
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Charts + metrics
-# -----------------------------------------------------------------------------
+# =============================================================================
 def create_kpi_metrics(df: pd.DataFrame, selected_month: int | None = None):
     month_df = df[df['MONTH'] == selected_month] if selected_month else df
     metrics = {
         'total_customers': df['CustomerID'].nunique() if 'CustomerID' in df.columns else 0,
         'total_arpu': df['ARPU'].sum() if 'ARPU' in df.columns else 0.0,
-        'avg_arpu': df.groupby('CustomerID')['ARPU'].mean().mean() if 'ARPU' in df.columns else 0.0,
+        'avg_arpu': df.groupby('CustomerID', observed=False)['ARPU'].mean().mean() if 'ARPU' in df.columns else 0.0,
         'total_lift': df['Price_Difference'].sum() if 'Price_Difference' in df.columns else 0.0,
         'avg_lift': df['Price_Difference'].mean() if 'Price_Difference' in df.columns else 0.0,
         'positive_lift_pct': ((df['Price_Difference'] > 0).mean() * 100) if 'Price_Difference' in df.columns else 0.0,
         'month_arpu': month_df['ARPU'].sum() if selected_month and 'ARPU' in df.columns else 0.0,
         'month_projected': ((month_df['ARPU'] + month_df['Price_Difference']).sum()
-                            if selected_month and 'ARPU' in df.columns and 'Price_Difference' in df.columns else 0.0),
+                            if selected_month and {'ARPU','Price_Difference'}.issubset(df.columns) else 0.0),
     }
     return metrics
 
 def create_arpu_chart(df: pd.DataFrame, selected_month: int | None = None):
-    hist_arpu = df.groupby('MONTH')['ARPU'].sum().reset_index()
+    hist_arpu = df.groupby('MONTH', observed=False)['ARPU'].sum().reset_index()
     hist_arpu['Month_Name'] = hist_arpu['MONTH'].map(MONTH_ABBR)
 
-    proj_arpu = df.groupby('MONTH').agg({'ARPU': 'sum', 'Price_Difference': 'sum'}).reset_index()
+    proj_arpu = df.groupby('MONTH', observed=False).agg({'ARPU': 'sum', 'Price_Difference': 'sum'}).reset_index()
     proj_arpu['Projected_ARPU'] = proj_arpu['ARPU'] + proj_arpu['Price_Difference']
     proj_arpu['Month_Name'] = proj_arpu['MONTH'].map(MONTH_ABBR)
 
@@ -355,7 +345,7 @@ def create_lift_distribution(df: pd.DataFrame, liquidity=None, consumption=None)
     if consumption and consumption != "All":
         filtered_df = filtered_df[filtered_df['Consumption_Persona'] == consumption]
 
-    lift_by_month = filtered_df.groupby('MONTH')['Price_Difference'].mean().reset_index()
+    lift_by_month = filtered_df.groupby('MONTH', observed=False)['Price_Difference'].mean().reset_index()
     lift_by_month['Month_Name'] = lift_by_month['MONTH'].map(MONTH_ABBR)
     colors = ['#25D366' if x > 0 else '#FF6B6B' for x in lift_by_month['Price_Difference']]
 
@@ -384,7 +374,7 @@ def create_sub_persona_chart(df: pd.DataFrame):
 
 def create_device_distribution(df: pd.DataFrame):
     device_dist = df.drop_duplicates('CustomerID')['Device_Category'].value_counts()
-    total = device_dist.sum()
+    total = device_dist.sum() if device_dist.sum() else 1
     percentages = (device_dist / total * 100).round(1)
     fig = go.Figure(data=[go.Bar(
         x=device_dist.index, y=device_dist.values,
@@ -399,9 +389,12 @@ def create_device_distribution(df: pd.DataFrame):
     return fig
 
 def create_persona_matrix(df: pd.DataFrame):
-    persona_counts = df.drop_duplicates('CustomerID').groupby(
-        ['Liquidity_Persona', 'Consumption_Persona']
-    ).size().reset_index(name='Count')
+    persona_counts = (
+        df.drop_duplicates('CustomerID')
+          .groupby(['Liquidity_Persona', 'Consumption_Persona'], observed=False)
+          .size()
+          .reset_index(name='Count')
+    )
     persona_pivot = persona_counts.pivot(index='Liquidity_Persona', columns='Consumption_Persona', values='Count').fillna(0)
     fig = go.Figure(data=go.Heatmap(
         z=persona_pivot.values, x=persona_pivot.columns, y=persona_pivot.index,
@@ -415,7 +408,11 @@ def create_persona_matrix(df: pd.DataFrame):
     return fig
 
 def create_persona_lift_heatmap(df: pd.DataFrame):
-    persona_lift = df.groupby(['Liquidity_Persona', 'Consumption_Persona'])['Price_Difference'].mean().reset_index()
+    persona_lift = (
+        df.groupby(['Liquidity_Persona', 'Consumption_Persona'], observed=False)['Price_Difference']
+          .mean()
+          .reset_index()
+    )
     persona_pivot = persona_lift.pivot(index='Liquidity_Persona', columns='Consumption_Persona', values='Price_Difference')
     values_flat = persona_pivot.values.flatten()
     values_flat = values_flat[~np.isnan(values_flat)]
@@ -449,22 +446,21 @@ def calculate_persona_metrics(df: pd.DataFrame, liquidity=None, consumption=None
     metrics = {
         'total_customers': unique_customers.shape[0],
         'total_annual_mbs': filtered_df['MB_CONSUMPTION'].sum() if 'MB_CONSUMPTION' in filtered_df.columns else 0.0,
-        'avg_annual_mbs': filtered_df.groupby('CustomerID')['MB_CONSUMPTION'].sum().mean()
+        'avg_annual_mbs': filtered_df.groupby('CustomerID', observed=False)['MB_CONSUMPTION'].sum().mean()
                           if 'MB_CONSUMPTION' in filtered_df.columns and not filtered_df.empty else 0.0,
         'total_voice': filtered_df['MINUTES'].sum() if 'MINUTES' in filtered_df.columns else 0.0,
-        'avg_voice': filtered_df.groupby('CustomerID')['MINUTES'].sum().mean()
+        'avg_voice': filtered_df.groupby('CustomerID', observed=False)['MINUTES'].sum().mean()
                       if 'MINUTES' in filtered_df.columns and not filtered_df.empty else 0.0,
         'total_annual_spend': filtered_df['ARPU'].sum() if 'ARPU' in filtered_df.columns else 0.0,
-        'avg_monthly_spend': filtered_df.groupby('CustomerID')['ARPU'].mean().mean()
+        'avg_monthly_spend': filtered_df.groupby('CustomerID', observed=False)['ARPU'].mean().mean()
                               if 'ARPU' in filtered_df.columns and not filtered_df.empty else 0.0,
-        'spend_volatility': filtered_df.groupby('CustomerID')['ARPU'].std().mean()
+        'spend_volatility': filtered_df.groupby('CustomerID', observed=False)['ARPU'].std().mean()
                             if 'ARPU' in filtered_df.columns and not filtered_df.empty else 0.0,
         'arpu_lift_sum': filtered_df['Price_Difference'].sum() if 'Price_Difference' in filtered_df.columns else 0.0,
         'arpu_pct_of_total': 0.0,
         'arpu_lift_pct_of_total': 0.0,
     }
 
-    # Data/voice ratios
     total_data = metrics['total_annual_mbs']
     total_voice = metrics['total_voice']
     if total_voice > 0:
@@ -482,9 +478,9 @@ def calculate_persona_metrics(df: pd.DataFrame, liquidity=None, consumption=None
 
     return metrics, device_comp, sub_persona_comp
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Main app
-# -----------------------------------------------------------------------------
+# =============================================================================
 def main():
     # Auth
     if not check_password():
@@ -507,8 +503,8 @@ def main():
         df = load_data()
 
     if df is None or df.empty:
-        st.error("Failed to load data. Please check the Google Drive link/file.")
-        return
+        st.error("Failed to load data from Google Drive. Make sure the file is shared (Anyone with the link can view), then click Rerun.")
+        st.stop()
 
     # Sidebar filters
     st.sidebar.header("🔍 Filters")
@@ -535,9 +531,8 @@ def main():
 
     # Metrics
     metrics = create_kpi_metrics(filtered_df, selected_month)
-
     total_company_arpu = df['ARPU'].sum() if 'ARPU' in df.columns else 0.0
-    total_company_projected = (df['ARPU'] + df['Price_Difference']).sum() if {'ARPU', 'Price_Difference'}.issubset(df.columns) else 0.0
+    total_company_projected = (df['ARPU'] + df['Price_Difference']).sum() if {'ARPU','Price_Difference'}.issubset(df.columns) else 0.0
 
     # Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -785,7 +780,7 @@ def main():
             st.markdown("**Data Coverage**")
             total_months = filtered_df['MONTH'].nunique() if 'MONTH' in filtered_df.columns else 0
             total_records = len(filtered_df)
-            avg_records_per_customer = filtered_df.groupby('CustomerID').size().mean() if 'CustomerID' in filtered_df.columns and total_records > 0 else 0
+            avg_records_per_customer = filtered_df.groupby('CustomerID', observed=False).size().mean() if 'CustomerID' in filtered_df.columns and total_records > 0 else 0
             st.metric("Total Months", total_months)
             st.metric("Total Records", f"{total_records:,}")
             st.metric("Avg Records/Customer", f"{avg_records_per_customer:.1f}")
