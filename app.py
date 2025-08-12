@@ -127,6 +127,45 @@ OFFER_CATALOG = {
         {"Code": "SNACK BUNDLE2", "Name": "Snack Bundle 2", "Type": "Postpaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
         {"Code": "SNACK BUNDLE3", "Name": "Snack Bundle 3", "Type": "Postpaid", "Data (MB)": 300, "Price ($)": 1.67, "Voice": 0},
     ])
+}": 66.34, "Voice": 2400},
+    ]),
+    
+    "Social & OTT Bundles": pd.DataFrame([
+        {"Code": "WHATSAPP", "Name": "WhatsApp Bundle", "Type": "Prepaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
+        {"Code": "WHATSAPP2", "Name": "WhatsApp Bundle 2", "Type": "Prepaid", "Data (MB)": 300, "Price ($)": 2, "Voice": 0},
+        {"Code": "SOCIALBUNDLE", "Name": "Social Data Bundle", "Type": "Prepaid", "Data (MB)": 300, "Price ($)": 2.34, "Voice": 0},
+        {"Code": "SOCIAL BUNDLE POST", "Name": "Social Bundle", "Type": "Postpaid", "Data (MB)": 1024, "Price ($)": 3, "Voice": 0},
+    ]),
+    
+    "Special Bundles": pd.DataFrame([
+        {"Code": "BILKHIDMEH BUNDLE", "Name": "Bil Khidmeh Bundle", "Type": "Prepaid", "Data (MB)": 1536, "Price ($)": 1.5, "Voice": 120},
+        {"Code": "STUDENTBUNDLE", "Name": "Student Bundle", "Type": "Prepaid", "Data (MB)": 5120, "Price ($)": 5, "Voice": 60},
+        {"Code": "TAWASOL BUNDLE", "Name": "Tawasol Bundle", "Type": "Prepaid", "Data (MB)": 100, "Price ($)": 4.5, "Voice": 10},
+        {"Code": "MA3AKBUNDLE", "Name": "Ma3ak Bundle", "Type": "Prepaid", "Data (MB)": 1024, "Price ($)": 1.5, "Voice": 120},
+        {"Code": "VISITORBUNDLE", "Name": "Visitor Bundle", "Type": "Prepaid", "Data (MB)": 10240, "Price ($)": 13, "Voice": 100},
+    ]),
+    
+    "Limited-Time Promotions": pd.DataFrame([
+        {"Code": "MOTHER'S DAY PROMO", "Name": "Mother's Day Promo", "Type": "Prepaid", "Data (MB)": 2048, "Price ($)": 1, "Voice": 60},
+        {"Code": "LABOR DAY PROMO", "Name": "Labor Day Promo", "Type": "Prepaid", "Data (MB)": 1024, "Price ($)": 1, "Voice": 60},
+        {"Code": "VALENTINE'S PROMO", "Name": "Valentine's Promo", "Type": "Prepaid", "Data (MB)": 2048, "Price ($)": 1.4, "Voice": 60},
+        {"Code": "FATHER'S DAY PROMO", "Name": "Father's Day Promo", "Type": "Prepaid", "Data (MB)": 2048, "Price ($)": 1.5, "Voice": 60},
+    ]),
+    
+    "Short-Term Data Bundles": pd.DataFrame([
+        {"Code": "2 HOURS DATA BUNDLE", "Name": "HD2", "Type": "Prepaid", "Data (MB)": 20, "Price ($)": 0.1, "Voice": 0},
+        {"Code": "6 HOURS DATA BUNDLE", "Name": "HD6", "Type": "Prepaid", "Data (MB)": 50, "Price ($)": 0.2, "Voice": 0},
+        {"Code": "DDB", "Name": "Daily Data Bundle", "Type": "Prepaid", "Data (MB)": 50, "Price ($)": 0.34, "Voice": 0},
+        {"Code": "2DDB", "Name": "2 Days Data Bundle", "Type": "Prepaid", "Data (MB)": 200, "Price ($)": 0.67, "Voice": 0},
+        {"Code": "DD4", "Name": "4 Days Data Bundle", "Type": "Prepaid", "Data (MB)": 700, "Price ($)": 1.34, "Voice": 0},
+        {"Code": "WDB", "Name": "Weekly Data Bundle", "Type": "Prepaid", "Data (MB)": 1024, "Price ($)": 2.34, "Voice": 0},
+    ]),
+    
+    "Postpaid Snacks": pd.DataFrame([
+        {"Code": "SNACK BUNDLE1", "Name": "Snack Bundle 1", "Type": "Postpaid", "Data (MB)": 100, "Price ($)": 1, "Voice": 0},
+        {"Code": "SNACK BUNDLE2", "Name": "Snack Bundle 2", "Type": "Postpaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
+        {"Code": "SNACK BUNDLE3", "Name": "Snack Bundle 3", "Type": "Postpaid", "Data (MB)": 300, "Price ($)": 1.67, "Voice": 0},
+    ])
 }
 
 # Function to download from Google Drive
