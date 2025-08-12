@@ -34,7 +34,7 @@ PASSWORD = "msba@touch"
 GDRIVE_FILE_ID = "1cPFjQmRzuZhwq0Q1S4l8fihhWwHhIcQs"
 DATA_FILE_NAME = "data.parquet"
 
-# Offer catalog data
+# Offer catalog data - FIXED VERSION
 OFFER_CATALOG = {
     "Legacy HS Series": pd.DataFrame([
         {"Code": "HS1 POST", "Name": "HS1 Post", "Type": "Postpaid", "Data (MB)": 500, "Price ($)": 3.5, "Voice": 0},
@@ -88,46 +88,9 @@ OFFER_CATALOG = {
         {"Code": "WEB AND TALK MINI 2", "Name": "Web & Talk Mini 2", "Type": "Postpaid", "Data (MB)": 2048, "Price ($)": 7.7, "Voice": 200},
         {"Code": "WEB AND TALK LIGHT", "Name": "Web & Talk Light", "Type": "Postpaid", "Data (MB)": 3072, "Price ($)": 16.34, "Voice": 600},
         {"Code": "WEB AND TALK POST", "Name": "Web & Talk", "Type": "Postpaid", "Data (MB)": 6144, "Price ($)": 33, "Voice": 1200},
-        {"Code": "WEB AND TALK ELITE", "Name": "Web & Talk Elite", "Type": "Postpaid", "Data (MB)": 30720, "Price ($)": 66.34, "Voice": 2400},   
+        {"Code": "WEB AND TALK ELITE", "Name": "Web & Talk Elite", "Type": "Postpaid", "Data (MB)": 30720, "Price ($)": 66.34, "Voice": 2400},
     ]),
     
-    "Social & OTT Bundles": pd.DataFrame([
-        {"Code": "WHATSAPP", "Name": "WhatsApp Bundle", "Type": "Prepaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
-        {"Code": "WHATSAPP2", "Name": "WhatsApp Bundle 2", "Type": "Prepaid", "Data (MB)": 300, "Price ($)": 2, "Voice": 0},
-        {"Code": "SOCIALBUNDLE", "Name": "Social Data Bundle", "Type": "Prepaid", "Data (MB)": 300, "Price ($)": 2.34, "Voice": 0},
-        {"Code": "SOCIAL BUNDLE POST", "Name": "Social Bundle", "Type": "Postpaid", "Data (MB)": 1024, "Price ($)": 3, "Voice": 0},
-    ]),
-    
-    "Special Bundles": pd.DataFrame([
-        {"Code": "BILKHIDMEH BUNDLE", "Name": "Bil Khidmeh Bundle", "Type": "Prepaid", "Data (MB)": 1536, "Price ($)": 1.5, "Voice": 120},
-        {"Code": "STUDENTBUNDLE", "Name": "Student Bundle", "Type": "Prepaid", "Data (MB)": 5120, "Price ($)": 5, "Voice": 60},
-        {"Code": "TAWASOL BUNDLE", "Name": "Tawasol Bundle", "Type": "Prepaid", "Data (MB)": 100, "Price ($)": 4.5, "Voice": 10},
-        {"Code": "MA3AKBUNDLE", "Name": "Ma3ak Bundle", "Type": "Prepaid", "Data (MB)": 1024, "Price ($)": 1.5, "Voice": 120},
-        {"Code": "VISITORBUNDLE", "Name": "Visitor Bundle", "Type": "Prepaid", "Data (MB)": 10240, "Price ($)": 13, "Voice": 100},
-    ]),
-    
-    "Limited-Time Promotions": pd.DataFrame([
-        {"Code": "MOTHER'S DAY PROMO", "Name": "Mother's Day Promo", "Type": "Prepaid", "Data (MB)": 2048, "Price ($)": 1, "Voice": 60},
-        {"Code": "LABOR DAY PROMO", "Name": "Labor Day Promo", "Type": "Prepaid", "Data (MB)": 1024, "Price ($)": 1, "Voice": 60},
-        {"Code": "VALENTINE'S PROMO", "Name": "Valentine's Promo", "Type": "Prepaid", "Data (MB)": 2048, "Price ($)": 1.4, "Voice": 60},
-        {"Code": "FATHER'S DAY PROMO", "Name": "Father's Day Promo", "Type": "Prepaid", "Data (MB)": 2048, "Price ($)": 1.5, "Voice": 60},
-    ]),
-    
-    "Short-Term Data Bundles": pd.DataFrame([
-        {"Code": "2 HOURS DATA BUNDLE", "Name": "HD2", "Type": "Prepaid", "Data (MB)": 20, "Price ($)": 0.1, "Voice": 0},
-        {"Code": "6 HOURS DATA BUNDLE", "Name": "HD6", "Type": "Prepaid", "Data (MB)": 50, "Price ($)": 0.2, "Voice": 0},
-        {"Code": "DDB", "Name": "Daily Data Bundle", "Type": "Prepaid", "Data (MB)": 50, "Price ($)": 0.34, "Voice": 0},
-        {"Code": "2DDB", "Name": "2 Days Data Bundle", "Type": "Prepaid", "Data (MB)": 200, "Price ($)": 0.67, "Voice": 0},
-        {"Code": "DD4", "Name": "4 Days Data Bundle", "Type": "Prepaid", "Data (MB)": 700, "Price ($)": 1.34, "Voice": 0},
-        {"Code": "WDB", "Name": "Weekly Data Bundle", "Type": "Prepaid", "Data (MB)": 1024, "Price ($)": 2.34, "Voice": 0},
-    ]),
-    
-    "Postpaid Snacks": pd.DataFrame([
-        {"Code": "SNACK BUNDLE1", "Name": "Snack Bundle 1", "Type": "Postpaid", "Data (MB)": 100, "Price ($)": 1, "Voice": 0},
-        {"Code": "SNACK BUNDLE2", "Name": "Snack Bundle 2", "Type": "Postpaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
-        {"Code": "SNACK BUNDLE3", "Name": "Snack Bundle 3", "Type": "Postpaid", "Data (MB)": 300, "Price ($)": 1.67, "Voice": 0},
-    ])
-
     "Social & OTT Bundles": pd.DataFrame([
         {"Code": "WHATSAPP", "Name": "WhatsApp Bundle", "Type": "Prepaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
         {"Code": "WHATSAPP2", "Name": "WhatsApp Bundle 2", "Type": "Prepaid", "Data (MB)": 300, "Price ($)": 2, "Voice": 0},
@@ -200,7 +163,7 @@ def download_from_gdrive():
         st.info("Please make sure the Google Drive link is set to 'Anyone with the link can view'")
         return None
 
-# Modified load_data function
+# Single load_data function
 @st.cache_data(persist=True, show_spinner=False)
 def load_data():
     """Load and preprocess the data with caching"""
@@ -243,81 +206,7 @@ def load_data():
         
     except Exception as e:
         st.error(f"Error loading data: {e}")
-        return None": 66.34, "Voice": 2400},
-    ]),
-    
-    "Social & OTT Bundles": pd.DataFrame([
-        {"Code": "WHATSAPP", "Name": "WhatsApp Bundle", "Type": "Prepaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
-        {"Code": "WHATSAPP2", "Name": "WhatsApp Bundle 2", "Type": "Prepaid", "Data (MB)": 300, "Price ($)": 2, "Voice": 0},
-        {"Code": "SOCIALBUNDLE", "Name": "Social Data Bundle", "Type": "Prepaid", "Data (MB)": 300, "Price ($)": 2.34, "Voice": 0},
-        {"Code": "SOCIAL BUNDLE POST", "Name": "Social Bundle", "Type": "Postpaid", "Data (MB)": 1024, "Price ($)": 3, "Voice": 0},
-    ]),
-    
-    "Special Bundles": pd.DataFrame([
-        {"Code": "BILKHIDMEH BUNDLE", "Name": "Bil Khidmeh Bundle", "Type": "Prepaid", "Data (MB)": 1536, "Price ($)": 1.5, "Voice": 120},
-        {"Code": "STUDENTBUNDLE", "Name": "Student Bundle", "Type": "Prepaid", "Data (MB)": 5120, "Price ($)": 5, "Voice": 60},
-        {"Code": "TAWASOL BUNDLE", "Name": "Tawasol Bundle", "Type": "Prepaid", "Data (MB)": 100, "Price ($)": 4.5, "Voice": 10},
-        {"Code": "MA3AKBUNDLE", "Name": "Ma3ak Bundle", "Type": "Prepaid", "Data (MB)": 1024, "Price ($)": 1.5, "Voice": 120},
-        {"Code": "VISITORBUNDLE", "Name": "Visitor Bundle", "Type": "Prepaid", "Data (MB)": 10240, "Price ($)": 13, "Voice": 100},
-    ]),
-    
-    "Limited-Time Promotions": pd.DataFrame([
-        {"Code": "MOTHER'S DAY PROMO", "Name": "Mother's Day Promo", "Type": "Prepaid", "Data (MB)": 2048, "Price ($)": 1, "Voice": 60},
-        {"Code": "LABOR DAY PROMO", "Name": "Labor Day Promo", "Type": "Prepaid", "Data (MB)": 1024, "Price ($)": 1, "Voice": 60},
-        {"Code": "VALENTINE'S PROMO", "Name": "Valentine's Promo", "Type": "Prepaid", "Data (MB)": 2048, "Price ($)": 1.4, "Voice": 60},
-        {"Code": "FATHER'S DAY PROMO", "Name": "Father's Day Promo", "Type": "Prepaid", "Data (MB)": 2048, "Price ($)": 1.5, "Voice": 60},
-    ]),
-    
-    "Short-Term Data Bundles": pd.DataFrame([
-        {"Code": "2 HOURS DATA BUNDLE", "Name": "HD2", "Type": "Prepaid", "Data (MB)": 20, "Price ($)": 0.1, "Voice": 0},
-        {"Code": "6 HOURS DATA BUNDLE", "Name": "HD6", "Type": "Prepaid", "Data (MB)": 50, "Price ($)": 0.2, "Voice": 0},
-        {"Code": "DDB", "Name": "Daily Data Bundle", "Type": "Prepaid", "Data (MB)": 50, "Price ($)": 0.34, "Voice": 0},
-        {"Code": "2DDB", "Name": "2 Days Data Bundle", "Type": "Prepaid", "Data (MB)": 200, "Price ($)": 0.67, "Voice": 0},
-        {"Code": "DD4", "Name": "4 Days Data Bundle", "Type": "Prepaid", "Data (MB)": 700, "Price ($)": 1.34, "Voice": 0},
-        {"Code": "WDB", "Name": "Weekly Data Bundle", "Type": "Prepaid", "Data (MB)": 1024, "Price ($)": 2.34, "Voice": 0},
-    ]),
-    
-    "Postpaid Snacks": pd.DataFrame([
-        {"Code": "SNACK BUNDLE1", "Name": "Snack Bundle 1", "Type": "Postpaid", "Data (MB)": 100, "Price ($)": 1, "Voice": 0},
-        {"Code": "SNACK BUNDLE2", "Name": "Snack Bundle 2", "Type": "Postpaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
-        {"Code": "SNACK BUNDLE3", "Name": "Snack Bundle 3", "Type": "Postpaid", "Data (MB)": 300, "Price ($)": 1.67, "Voice": 0},
-    ])
-}
-
-# Cache functions for performance
-@st.cache_data(persist=True)
-def load_data(file_path):
-    """Load and preprocess the data with caching"""
-    try:
-        # Try different file formats for optimization
-        if file_path.endswith('.parquet'):
-            df = pd.read_parquet(file_path)
-        elif file_path.endswith('.feather'):
-            df = pd.read_feather(file_path)
-        else:  # CSV
-            # For large CSV, use chunking
-            df = pd.read_csv(file_path, low_memory=False)
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
         return None
-    
-    # Preprocess data
-    df['MONTH'] = pd.to_numeric(df['MONTH'], errors='coerce').fillna(0).astype(int)
-    df = df[df['MONTH'].between(1, 12)]
-    
-    # Parse offer patterns
-    df['offer_pattern_norm'] = df['offer_pattern'].apply(normalize_offer_pattern)
-    df['offer_pattern_str'] = df['offer_pattern_norm'].apply(
-        lambda lst: ", ".join(lst) if lst else "None"
-    )
-    
-    # Parse recommended offers
-    df['recommended_offers_norm'] = df['Recommended_Offer_Pattern'].apply(normalize_offer_pattern)
-    df['recommended_offers_str'] = df['recommended_offers_norm'].apply(
-        lambda lst: ", ".join(lst) if lst else "None"
-    )
-    
-    return df
 
 def normalize_offer_pattern(val):
     """Convert raw stored offer pattern to a clean list of offer strings."""
