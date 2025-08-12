@@ -127,9 +127,7 @@ OFFER_CATALOG = {
         {"Code": "SNACK BUNDLE2", "Name": "Snack Bundle 2", "Type": "Postpaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
         {"Code": "SNACK BUNDLE3", "Name": "Snack Bundle 3", "Type": "Postpaid", "Data (MB)": 300, "Price ($)": 1.67, "Voice": 0},
     ])
-}": 66.34, "Voice": 2400},
-    ]),
-    
+
     "Social & OTT Bundles": pd.DataFrame([
         {"Code": "WHATSAPP", "Name": "WhatsApp Bundle", "Type": "Prepaid", "Data (MB)": 200, "Price ($)": 1.34, "Voice": 0},
         {"Code": "WHATSAPP2", "Name": "WhatsApp Bundle 2", "Type": "Prepaid", "Data (MB)": 300, "Price ($)": 2, "Voice": 0},
