@@ -88,7 +88,7 @@ OFFER_CATALOG = {
         {"Code": "WEB AND TALK MINI 2", "Name": "Web & Talk Mini 2", "Type": "Postpaid", "Data (MB)": 2048, "Price ($)": 7.7, "Voice": 200},
         {"Code": "WEB AND TALK LIGHT", "Name": "Web & Talk Light", "Type": "Postpaid", "Data (MB)": 3072, "Price ($)": 16.34, "Voice": 600},
         {"Code": "WEB AND TALK POST", "Name": "Web & Talk", "Type": "Postpaid", "Data (MB)": 6144, "Price ($)": 33, "Voice": 1200},
-        {"Code": "WEB AND TALK ELITE", "Name": "Web & Talk Elite", "Type": "Postpaid", "Data (MB)": 30720, "Price ($)": 66.34, "Voice": 2400},
+        {"Code": "WEB AND TALK ELITE", "Name": "Web & Talk Elite", "Type": "Postpaid", "Data (MB)": 30720, "Price ($)": 66.34, "Voice": 2400},   
     ]),
     
     "Social & OTT Bundles": pd.DataFrame([
