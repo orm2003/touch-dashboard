@@ -319,8 +319,8 @@ def check_password() -> bool:
                           placeholder="Enter password...")
             st.markdown(
                 "<div style='text-align: center; margin-top: 50px; color: #999;'>"
-                "<small>Touch Recommendation Dashboard v1.0</small><br>"
-                "<small>© 2024 Touch Communications. All rights reserved.</small>"
+                "<small>Touch Recommendation Dashboard Using 2 way Clustering</small><br>"
+                "<small>Touch MSBA Capstone Project | Omar Mneimne.</small>"
                 "</div>",
                 unsafe_allow_html=True,
             )
