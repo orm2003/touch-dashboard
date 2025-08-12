@@ -135,7 +135,7 @@ OFFER_CATALOG = {
 }
 
 # =============================================================================
-# Helpers (no heavy structures returned)
+# Helpers
 # =============================================================================
 def _download_gdrive_file(dst_path: str) -> None:
     """Chunked download from Google Drive to local file (no Streamlit calls)."""
@@ -193,7 +193,6 @@ def _downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
     """Downcast numeric columns to reduce memory footprint."""
     for col in df.select_dtypes(include=["integer", "Int64", "float"]).columns:
         if col == "MONTH":
-            # Force to small int; we clamp later
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int16")
             continue
         if pd.api.types.is_integer_dtype(df[col]):
@@ -207,11 +206,20 @@ def _astype_categories(df: pd.DataFrame, cols: list[str]) -> None:
         if c in df.columns and df[c].dtype == "object":
             df[c] = df[c].astype("category")
 
+def _is_no_rec_string(s: object) -> bool:
+    """Robust 'no recommendation' detector used in analytics stats."""
+    if s is None:
+        return True
+    s = str(s).strip()
+    if not s:
+        return True
+    return s.upper() in {"NONE", "NULL", "NAN", "NO_RECOMMENDATION"}
+
 # =============================================================================
 # Data loading (pure inside cache; NO st.* in here)
 # =============================================================================
 @st.cache_data(persist=True, show_spinner=False)
-def load_data() -> pd.DataFrame | None:
+def load_data():
     """
     Load + preprocess data from Google Drive.
     Memory optimizations:
@@ -243,7 +251,6 @@ def load_data() -> pd.DataFrame | None:
 
         # String-like IDs as category (big win if many repeats)
         if "CustomerID" in df.columns:
-            # Keep as string-ish but categorical to save memory
             df["CustomerID"] = df["CustomerID"].astype(str).astype("category")
 
         # Key categoricals
@@ -265,15 +272,15 @@ def load_data() -> pd.DataFrame | None:
         else:
             df["recommended_offers_str"] = "None"
 
-        df["recommended_has"] = (df["recommended_offers_str"] != "None")
+        # boolean: has recommendation
+        df["recommended_has"] = ~df["recommended_offers_str"].apply(_is_no_rec_string)
 
-        # Ensure Price_Difference exists
+        # Ensure Price_Difference exists and is float32
         if "Price_Difference" not in df.columns:
             df["Price_Difference"] = np.float32(0.0)
         else:
             df["Price_Difference"] = df["Price_Difference"].astype("float32")
 
-        # Final GC hint
         gc.collect()
         return df
     except Exception:
@@ -476,14 +483,21 @@ def create_persona_matrix(df: pd.DataFrame):
     return fig
 
 def create_persona_lift_heatmap(df: pd.DataFrame):
+    """Heatmap with correct values per cell and 2-decimal labels."""
     if not {"Liquidity_Persona", "Consumption_Persona", "Price_Difference"}.issubset(df.columns):
         return go.Figure()
+
     persona_lift = (
         df.groupby(["Liquidity_Persona", "Consumption_Persona"], observed=False)["Price_Difference"]
           .mean()
           .reset_index()
     )
     persona_pivot = persona_lift.pivot(index="Liquidity_Persona", columns="Consumption_Persona", values="Price_Difference")
+
+    # Build a string matrix for labels (ensures 2-dec and avoids plotly reformatting)
+    text_fmt = persona_pivot.applymap(lambda v: "" if pd.isna(v) else f"{v:.2f}")
+
+    # Percentile-based color scaling to handle outliers
     values_flat = persona_pivot.values.flatten()
     values_flat = values_flat[~np.isnan(values_flat)]
     if len(values_flat) > 0:
@@ -491,16 +505,29 @@ def create_persona_lift_heatmap(df: pd.DataFrame):
         vmax = float(np.percentile(values_flat, 95))
     else:
         vmin, vmax = 0.0, 10.0
+
     fig = go.Figure(data=go.Heatmap(
-        z=persona_pivot.values, x=persona_pivot.columns, y=persona_pivot.index,
-        colorscale=[[0, "#FF4444"], [0.25, "#FFB6B6"], [0.5, "#FFFFFF"], [0.75, "#B6FFB6"], [1, "#44FF44"]],
-        zmid=0, zmin=vmin, zmax=vmax,
-        text=np.round(persona_pivot.values, 2), texttemplate="$%{text}", textfont={"size": 10},
+        z=persona_pivot.values,
+        x=persona_pivot.columns,
+        y=persona_pivot.index,
+        colorscale=[
+            [0, "#FF4444"], [0.25, "#FFB6B6"], [0.5, "#FFFFFF"],
+            [0.75, "#B6FFB6"], [1, "#44FF44"]
+        ],
+        zmid=0,
+        zmin=vmin,
+        zmax=vmax,
+        text=text_fmt.values,
+        texttemplate="$%{text}",   # uses the pre-formatted strings
+        textfont={"size": 10},
         colorbar=dict(title="Avg ARPU Lift ($)")
     ))
     fig.update_layout(
-        title="Average ARPU Lift by Persona Combination", xaxis_title="Consumption Persona",
-        yaxis_title="Liquidity Persona", height=450, template="plotly_white"
+        title="Average ARPU Lift by Persona Combination",
+        xaxis_title="Consumption Persona",
+        yaxis_title="Liquidity Persona",
+        height=450,
+        template="plotly_white"
     )
     return fig
 
@@ -612,7 +639,7 @@ def main():
     selected_month = st.sidebar.slider("Select Month", min_value=1, max_value=12, value=12, format="%d")
     st.sidebar.markdown(f"**Selected:** {MONTH_NAMES[selected_month]}")
 
-    # Apply filters (no copies if possible thanks to CoW)
+    # Apply filters
     filtered_df = df
     if selected_customer_type != "All" and "Customer_Type" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["Customer_Type"] == selected_customer_type]
@@ -694,7 +721,7 @@ def main():
 - Total projected ARPU increase: **${metrics['total_lift']:,.0f}**
 """)
 
-    # --- Tab 2: Customer Explorer (hardened + memory-light)
+    # --- Tab 2: Customer Explorer (hardened)
     with tab2:
         st.markdown("### 🔍 Customer Explorer")
         col_left, col_right = st.columns([1, 3])
@@ -870,24 +897,22 @@ def main():
                 st.error("Customer Explorer hit an error. Details below:")
                 st.exception(e)
 
-    # --- Tab 3: Analytics (use memory-light masks)
+    # --- Tab 3: Analytics (Offer Migration + Stats fixes)
     with tab3:
         st.markdown("### 📈 Advanced Analytics")
         st.markdown("#### Offer Migration Analysis")
 
-        current_offers_filtered = (
-            filtered_df.loc[filtered_df["offer_pattern_str"] != "None", "offer_pattern_str"]
-            .value_counts()
-            .head(10)
-            if "offer_pattern_str" in filtered_df.columns else pd.Series(dtype=int)
-        )
+        # Current offers: drop 'None' and 'NO_RECOMMENDATION' explicitly
+        if "offer_pattern_str" in filtered_df.columns:
+            cur_mask = ~filtered_df["offer_pattern_str"].apply(_is_no_rec_string)
+            current_offers_filtered = filtered_df.loc[cur_mask, "offer_pattern_str"].value_counts().head(10)
+        else:
+            current_offers_filtered = pd.Series(dtype=int)
 
+        # Recommended offers: use recommended_has, which already excludes 'None'/'NO_RECOMMENDATION'
         if "recommended_has" in filtered_df.columns and "recommended_offers_str" in filtered_df.columns:
-            recommended_offers_filtered = (
-                filtered_df.loc[filtered_df["recommended_has"], "recommended_offers_str"]
-                .value_counts()
-                .head(10)
-            )
+            rec_mask = filtered_df["recommended_has"]
+            recommended_offers_filtered = filtered_df.loc[rec_mask, "recommended_offers_str"].value_counts().head(10)
         else:
             recommended_offers_filtered = pd.Series(dtype=int)
 
@@ -896,10 +921,22 @@ def main():
             st.markdown("**Top Current Offers**")
             if not current_offers_filtered.empty:
                 fig = go.Figure(data=[go.Bar(
-                    y=current_offers_filtered.index, x=current_offers_filtered.values,
-                    orientation="h", marker_color="#4285F4"
+                    y=current_offers_filtered.index,
+                    x=current_offers_filtered.values,
+                    orientation="h",
+                    marker_color="#4285F4",
+                    text=current_offers_filtered.values,
+                    textposition="auto",
                 )])
-                fig.update_layout(height=400, template="plotly_white", xaxis_title="Number of Customers", showlegend=False)
+                fig.update_layout(
+                    height=400,
+                    template="plotly_white",
+                    showlegend=False,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                )
+                # Hide x-axis completely as requested
+                fig.update_xaxes(visible=False, showgrid=False, zeroline=False)
+                fig.update_yaxes(showgrid=False)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No current offers to display")
@@ -908,10 +945,21 @@ def main():
             st.markdown("**Top Recommended Offers**")
             if not recommended_offers_filtered.empty:
                 fig = go.Figure(data=[go.Bar(
-                    y=recommended_offers_filtered.index, x=recommended_offers_filtered.values,
-                    orientation="h", marker_color="#25D366"
+                    y=recommended_offers_filtered.index,
+                    x=recommended_offers_filtered.values,
+                    orientation="h",
+                    marker_color="#25D366",
+                    text=recommended_offers_filtered.values,
+                    textposition="auto",
                 )])
-                fig.update_layout(height=400, template="plotly_white", xaxis_title="Number of Customers", showlegend=False)
+                fig.update_layout(
+                    height=400,
+                    template="plotly_white",
+                    showlegend=False,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                )
+                fig.update_xaxes(visible=False, showgrid=False, zeroline=False)
+                fig.update_yaxes(showgrid=False)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No recommended offers to display")
@@ -931,10 +979,15 @@ def main():
 
         with b:
             st.markdown("**Recommendation Impact**")
-            rec_rate = ((filtered_df["recommended_has"].mean() * 100)
-                        if "recommended_has" in filtered_df.columns and len(filtered_df) > 0 else 0.0)
+            # Robust 'no recommendation' count
+            if "recommended_offers_str" in filtered_df.columns:
+                no_rec_count = int(filtered_df["recommended_offers_str"].apply(_is_no_rec_string).sum())
+                rec_rate = (100.0 * (1 - no_rec_count / len(filtered_df))) if len(filtered_df) > 0 else 0.0
+            else:
+                no_rec_count = len(filtered_df)
+                rec_rate = 0.0
             positive_lift = (filtered_df["Price_Difference"] > 0).sum() if "Price_Difference" in filtered_df.columns else 0
-            no_rec_count = int(len(filtered_df) - filtered_df["recommended_has"].sum()) if "recommended_has" in filtered_df.columns else len(filtered_df)
+
             st.metric("Recommendation Rate", f"{rec_rate:.1f}%")
             st.metric("Positive Lift Cases", f"{positive_lift:,}")
             st.metric("No Recommendation", f"{no_rec_count:,}")
