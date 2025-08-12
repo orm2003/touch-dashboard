@@ -1,4 +1,5 @@
 import os
+import gc
 import ssl
 import ast
 import hashlib
@@ -13,7 +14,7 @@ import streamlit as st
 from PIL import Image
 
 # =============================================================================
-# Page config
+# Streamlit page + debug
 # =============================================================================
 st.set_page_config(
     page_title="Touch Recommendation Dashboard",
@@ -21,6 +22,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+# Show full exceptions in the app (useful on Cloud)
+st.set_option("client.showErrorDetails", True)
+
+# Make pandas less copy-happy (saves memory on filters/transforms)
+pd.options.mode.copy_on_write = True
 
 # =============================================================================
 # Constants
@@ -34,12 +40,12 @@ MONTH_ABBR = {m: MONTH_NAMES[m][:3] for m in MONTH_NAMES}
 
 PASSWORD = "msba@touch"
 
-# Google Drive file configuration (parquet)
+# Google Drive parquet file (≈35MB)
 GDRIVE_FILE_ID = "1cPFjQmRzuZhwq0Q1S4l8fihhWwHhIcQs"
 DATA_FILE_NAME = "data.parquet"
 
 # =============================================================================
-# Offer catalog (unchanged)
+# Offer catalog (small; negligible memory)
 # =============================================================================
 OFFER_CATALOG = {
     "Legacy HS Series": pd.DataFrame([
@@ -129,41 +135,7 @@ OFFER_CATALOG = {
 }
 
 # =============================================================================
-# Helpers
-# =============================================================================
-def normalize_offer_pattern(val):
-    """Convert raw stored offer pattern to a clean list of offer strings."""
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return []
-    if isinstance(val, str):
-        s = val.strip()
-        if not s or s.upper() in {"NONE", "NULL", "NAN", "NO_RECOMMENDATION"}:
-            return []
-        if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")):
-            try:
-                lit = ast.literal_eval(s)
-                if isinstance(lit, (list, tuple)):
-                    return [str(x).strip() for x in lit if x and str(x).strip()]
-                return [str(lit).strip()]
-            except Exception:
-                pass
-        if "," in s:
-            parts = [p.strip().strip("'\"") for p in s.split(",")]
-            return [p for p in parts if p and p.upper() not in {"NONE", "NULL", "NAN"}]
-        return [s]
-    if isinstance(val, (list, tuple)):
-        cleaned = []
-        for x in val:
-            if x is None or (isinstance(x, float) and pd.isna(x)):
-                continue
-            s = str(x).strip()
-            if s and s.upper() not in {"NONE", "NULL", "NAN"}:
-                cleaned.append(s)
-        return cleaned
-    return [str(val).strip()] if val else []
-
-# =============================================================================
-# Data loading (pure inside cache; NO st.* calls in cached functions)
+# Helpers (no heavy structures returned)
 # =============================================================================
 def _download_gdrive_file(dst_path: str) -> None:
     """Chunked download from Google Drive to local file (no Streamlit calls)."""
@@ -181,48 +153,130 @@ def _download_gdrive_file(dst_path: str) -> None:
                 break
             out.write(b)
 
+def _normalize_offer_to_str(val: object) -> str:
+    """Return a compact, display-friendly string. Avoid storing list objects (saves memory)."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return "None"
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s.upper() in {"NONE", "NULL", "NAN", "NO_RECOMMENDATION"}:
+            return "None"
+        # Try to parse list/tuple string
+        if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")):
+            try:
+                lit = ast.literal_eval(s)
+                if isinstance(lit, (list, tuple)):
+                    parts = [str(x).strip() for x in lit if x and str(x).strip()]
+                    return ", ".join(parts) if parts else "None"
+                return str(lit).strip() or "None"
+            except Exception:
+                pass
+        # Comma-separated fallback
+        if "," in s:
+            parts = [p.strip().strip("'\"") for p in s.split(",")]
+            parts = [p for p in parts if p and p.upper() not in {"NONE", "NULL", "NAN"}]
+            return ", ".join(parts) if parts else "None"
+        return s
+    if isinstance(val, (list, tuple)):
+        parts = []
+        for x in val:
+            if x is None or (isinstance(x, float) and pd.isna(x)):
+                continue
+            s = str(x).strip()
+            if s and s.upper() not in {"NONE", "NULL", "NAN"}:
+                parts.append(s)
+        return ", ".join(parts) if parts else "None"
+    s = str(val).strip()
+    return s if s else "None"
+
+def _downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Downcast numeric columns to reduce memory footprint."""
+    for col in df.select_dtypes(include=["integer", "Int64", "float"]).columns:
+        if col == "MONTH":
+            # Force to small int; we clamp later
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int16")
+            continue
+        if pd.api.types.is_integer_dtype(df[col]):
+            df[col] = pd.to_numeric(df[col], errors="coerce", downcast="integer")
+        elif pd.api.types.is_float_dtype(df[col]):
+            df[col] = pd.to_numeric(df[col], errors="coerce", downcast="float")
+    return df
+
+def _astype_categories(df: pd.DataFrame, cols: list[str]) -> None:
+    for c in cols:
+        if c in df.columns and df[c].dtype == "object":
+            df[c] = df[c].astype("category")
+
+# =============================================================================
+# Data loading (pure inside cache; NO st.* in here)
+# =============================================================================
 @st.cache_data(persist=True, show_spinner=False)
 def load_data() -> pd.DataFrame | None:
-    """Load + preprocess data for the app (uses Google Drive in cloud)."""
+    """
+    Load + preprocess data from Google Drive.
+    Memory optimizations:
+      - numeric downcasting
+      - string->category for key columns (incl. CustomerID)
+      - MONTH forced to int8 (1-12)
+      - store only offer strings + boolean flag (no list columns)
+    """
     try:
         _download_gdrive_file(DATA_FILE_NAME)
         df = pd.read_parquet(DATA_FILE_NAME)
 
-        # Memory optimization
-        for col in ['Customer_Type', 'Liquidity_Persona', 'Consumption_Persona',
-                    'Sub_Persona', 'Device_Category', 'DEVICE_MODEL']:
-            if col in df.columns:
-                df[col] = df[col].astype('category')
+        # Downcast numbers first
+        df = _downcast_numeric(df)
 
-        if 'CustomerID' in df.columns:
-            df['CustomerID'] = df['CustomerID'].astype(str)
+        # MONTH cleanup -> int8
+        if "MONTH" in df.columns:
+            df["MONTH"] = pd.to_numeric(df["MONTH"], errors="coerce").fillna(0).astype("int16")
+            df = df[df["MONTH"].between(1, 12)]
+            df["MONTH"] = df["MONTH"].astype("int8")
 
-        # Clean month
-        if 'MONTH' in df.columns:
-            df['MONTH'] = pd.to_numeric(df['MONTH'], errors='coerce').fillna(0).astype(int)
-            df = df[df['MONTH'].between(1, 12)]
+        # Known numeric columns -> tighter floats/ints
+        for c in ["ARPU", "Price_Difference", "Recommended_Offer_Price", "MB_CONSUMPTION",
+                  "mb_allowance", "mb_usage_pct"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce", downcast="float")
+        if "MINUTES" in df.columns:
+            df["MINUTES"] = pd.to_numeric(df["MINUTES"], errors="coerce", downcast="integer")
 
-        # Parse patterns
-        if 'offer_pattern' in df.columns:
-            df['offer_pattern_norm'] = df['offer_pattern'].apply(normalize_offer_pattern)
-            df['offer_pattern_str']  = df['offer_pattern_norm'].apply(lambda lst: ", ".join(lst) if lst else "None")
+        # String-like IDs as category (big win if many repeats)
+        if "CustomerID" in df.columns:
+            # Keep as string-ish but categorical to save memory
+            df["CustomerID"] = df["CustomerID"].astype(str).astype("category")
+
+        # Key categoricals
+        _astype_categories(df, [
+            "Customer_Type", "Liquidity_Persona", "Consumption_Persona",
+            "Sub_Persona", "Device_Category", "DEVICE_MODEL"
+        ])
+
+        # Offers: keep only compact string + boolean
+        if "offer_pattern" in df.columns:
+            df["offer_pattern_str"] = df["offer_pattern"].apply(_normalize_offer_to_str)
+            df.drop(columns=["offer_pattern"], inplace=True)
         else:
-            df['offer_pattern_norm'] = [[] for _ in range(len(df))]
-            df['offer_pattern_str']  = "None"
+            df["offer_pattern_str"] = "None"
 
-        if 'Recommended_Offer_Pattern' in df.columns:
-            df['recommended_offers_norm'] = df['Recommended_Offer_Pattern'].apply(normalize_offer_pattern)
-            df['recommended_offers_str']  = df['recommended_offers_norm'].apply(lambda lst: ", ".join(lst) if lst else "None")
+        if "Recommended_Offer_Pattern" in df.columns:
+            df["recommended_offers_str"] = df["Recommended_Offer_Pattern"].apply(_normalize_offer_to_str)
+            df.drop(columns=["Recommended_Offer_Pattern"], inplace=True)
         else:
-            df['recommended_offers_norm'] = [[] for _ in range(len(df))]
-            df['recommended_offers_str']  = "None"
+            df["recommended_offers_str"] = "None"
 
-        if 'Price_Difference' not in df.columns:
-            df['Price_Difference'] = 0.0
+        df["recommended_has"] = (df["recommended_offers_str"] != "None")
 
+        # Ensure Price_Difference exists
+        if "Price_Difference" not in df.columns:
+            df["Price_Difference"] = np.float32(0.0)
+        else:
+            df["Price_Difference"] = df["Price_Difference"].astype("float32")
+
+        # Final GC hint
+        gc.collect()
         return df
     except Exception:
-        # Fail quietly; we handle UI messaging in main()
         return None
 
 # =============================================================================
@@ -277,38 +331,38 @@ def check_password() -> bool:
 # Charts + metrics
 # =============================================================================
 def create_kpi_metrics(df: pd.DataFrame, selected_month: int | None = None):
-    month_df = df[df['MONTH'] == selected_month] if selected_month else df
+    month_df = df[df["MONTH"] == selected_month] if selected_month else df
     metrics = {
-        'total_customers': df['CustomerID'].nunique() if 'CustomerID' in df.columns else 0,
-        'total_arpu': df['ARPU'].sum() if 'ARPU' in df.columns else 0.0,
-        'avg_arpu': df.groupby('CustomerID', observed=False)['ARPU'].mean().mean() if 'ARPU' in df.columns else 0.0,
-        'total_lift': df['Price_Difference'].sum() if 'Price_Difference' in df.columns else 0.0,
-        'avg_lift': df['Price_Difference'].mean() if 'Price_Difference' in df.columns else 0.0,
-        'positive_lift_pct': ((df['Price_Difference'] > 0).mean() * 100) if 'Price_Difference' in df.columns else 0.0,
-        'month_arpu': month_df['ARPU'].sum() if selected_month and 'ARPU' in df.columns else 0.0,
-        'month_projected': ((month_df['ARPU'] + month_df['Price_Difference']).sum()
-                            if selected_month and {'ARPU','Price_Difference'}.issubset(df.columns) else 0.0),
+        "total_customers": df["CustomerID"].nunique() if "CustomerID" in df.columns else 0,
+        "total_arpu": df["ARPU"].sum() if "ARPU" in df.columns else 0.0,
+        "avg_arpu": (df.groupby("CustomerID", observed=False)["ARPU"].mean().mean()
+                     if "ARPU" in df.columns and not df.empty else 0.0),
+        "total_lift": df["Price_Difference"].sum() if "Price_Difference" in df.columns else 0.0,
+        "avg_lift": df["Price_Difference"].mean() if "Price_Difference" in df.columns else 0.0,
+        "positive_lift_pct": ((df["Price_Difference"] > 0).mean() * 100) if "Price_Difference" in df.columns else 0.0,
+        "month_arpu": month_df["ARPU"].sum() if selected_month and "ARPU" in df.columns else 0.0,
+        "month_projected": ((month_df["ARPU"] + month_df["Price_Difference"]).sum()
+                            if selected_month and {"ARPU","Price_Difference"}.issubset(df.columns) else 0.0),
     }
     return metrics
 
 def create_arpu_chart(df: pd.DataFrame, selected_month: int | None = None):
-    hist_arpu = df.groupby('MONTH', observed=False)['ARPU'].sum().reset_index()
-    hist_arpu['Month_Name'] = hist_arpu['MONTH'].map(MONTH_ABBR)
-
-    proj_arpu = df.groupby('MONTH', observed=False).agg({'ARPU': 'sum', 'Price_Difference': 'sum'}).reset_index()
-    proj_arpu['Projected_ARPU'] = proj_arpu['ARPU'] + proj_arpu['Price_Difference']
-    proj_arpu['Month_Name'] = proj_arpu['MONTH'].map(MONTH_ABBR)
+    hist_arpu = df.groupby("MONTH", observed=False)["ARPU"].sum().reset_index()
+    hist_arpu["Month_Name"] = hist_arpu["MONTH"].map(MONTH_ABBR)
+    proj_arpu = df.groupby("MONTH", observed=False).agg({"ARPU": "sum", "Price_Difference": "sum"}).reset_index()
+    proj_arpu["Projected_ARPU"] = proj_arpu["ARPU"] + proj_arpu["Price_Difference"]
+    proj_arpu["Month_Name"] = proj_arpu["MONTH"].map(MONTH_ABBR)
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=hist_arpu['Month_Name'], y=hist_arpu['ARPU'],
-        mode='lines+markers', name='Actual ARPU 2024',
-        line=dict(color='#1A73E8', width=3), marker=dict(size=8)
+        x=hist_arpu["Month_Name"], y=hist_arpu["ARPU"],
+        mode="lines+markers", name="Actual ARPU 2024",
+        line=dict(color="#1A73E8", width=3), marker=dict(size=8)
     ))
     fig.add_trace(go.Scatter(
-        x=proj_arpu['Month_Name'], y=proj_arpu['Projected_ARPU'],
-        mode='lines+markers', name='Projected ARPU 2025 (M-Series Transition)',
-        line=dict(color='#25D366', width=3, dash='dash'), marker=dict(size=8)
+        x=proj_arpu["Month_Name"], y=proj_arpu["Projected_ARPU"],
+        mode="lines+markers", name="Projected ARPU 2025 (M-Series Transition)",
+        line=dict(color="#25D366", width=3, dash="dash"), marker=dict(size=8)
     ))
 
     if selected_month:
@@ -320,38 +374,42 @@ def create_arpu_chart(df: pd.DataFrame, selected_month: int | None = None):
     fig.update_layout(
         title="ARPU Trends: Historical vs Projected Impact",
         xaxis_title="Month", yaxis_title="ARPU ($)",
-        template="plotly_white", height=400, hovermode='x unified',
+        template="plotly_white", height=400, hovermode="x unified",
         showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     return fig
 
-def create_persona_distribution(df: pd.DataFrame, persona_type='Liquidity_Persona'):
-    dist = df.drop_duplicates('CustomerID')[persona_type].value_counts()
+def create_persona_distribution(df: pd.DataFrame, persona_type="Liquidity_Persona"):
+    base = df.drop_duplicates("CustomerID")
+    if persona_type not in base.columns or base.empty:
+        return go.Figure()
+    dist = base[persona_type].value_counts()
     fig = go.Figure(data=[go.Bar(
-        x=dist.index, y=dist.values, marker_color='#1A73E8',
-        text=dist.values, textposition='auto'
+        x=dist.index, y=dist.values, marker_color="#1A73E8",
+        text=dist.values, textposition="auto"
     )])
     fig.update_layout(
         title=f"Customer Distribution by {persona_type.replace('_', ' ')}",
-        xaxis_title=persona_type.replace('_', ' '), yaxis_title="Number of Customers",
+        xaxis_title=persona_type.replace("_", " "), yaxis_title="Number of Customers",
         template="plotly_white", height=350, showlegend=False
     )
     return fig
 
 def create_lift_distribution(df: pd.DataFrame, liquidity=None, consumption=None):
-    filtered_df = df.copy()
-    if liquidity and liquidity != "All":
-        filtered_df = filtered_df[filtered_df['Liquidity_Persona'] == liquidity]
-    if consumption and consumption != "All":
-        filtered_df = filtered_df[filtered_df['Consumption_Persona'] == consumption]
-
-    lift_by_month = filtered_df.groupby('MONTH', observed=False)['Price_Difference'].mean().reset_index()
-    lift_by_month['Month_Name'] = lift_by_month['MONTH'].map(MONTH_ABBR)
-    colors = ['#25D366' if x > 0 else '#FF6B6B' for x in lift_by_month['Price_Difference']]
+    filtered_df = df
+    if liquidity and liquidity != "All" and "Liquidity_Persona" in df.columns:
+        filtered_df = filtered_df[filtered_df["Liquidity_Persona"] == liquidity]
+    if consumption and consumption != "All" and "Consumption_Persona" in df.columns:
+        filtered_df = filtered_df[filtered_df["Consumption_Persona"] == consumption]
+    if "Price_Difference" not in filtered_df.columns:
+        return go.Figure()
+    lift_by_month = filtered_df.groupby("MONTH", observed=False)["Price_Difference"].mean().reset_index()
+    lift_by_month["Month_Name"] = lift_by_month["MONTH"].map(MONTH_ABBR)
+    colors = ["#25D366" if x > 0 else "#FF6B6B" for x in lift_by_month["Price_Difference"]]
 
     fig = go.Figure(data=[go.Bar(
-        x=lift_by_month['Month_Name'], y=lift_by_month['Price_Difference'],
-        marker_color=colors, text=[f"${x:.2f}" for x in lift_by_month['Price_Difference']], textposition='auto'
+        x=lift_by_month["Month_Name"], y=lift_by_month["Price_Difference"],
+        marker_color=colors, text=[f"${x:.2f}" for x in lift_by_month["Price_Difference"]], textposition="auto"
     )])
     fig.update_layout(
         title="Average ARPU Lift by Month", xaxis_title="Month", yaxis_title="ARPU Lift ($)",
@@ -361,7 +419,10 @@ def create_lift_distribution(df: pd.DataFrame, liquidity=None, consumption=None)
     return fig
 
 def create_sub_persona_chart(df: pd.DataFrame):
-    sub_dist = df.drop_duplicates('CustomerID')['Sub_Persona'].value_counts().head(10)
+    base = df.drop_duplicates("CustomerID")
+    if "Sub_Persona" not in base.columns or base.empty:
+        return go.Figure()
+    sub_dist = base["Sub_Persona"].value_counts().head(10)
     fig = go.Figure(data=[go.Pie(
         labels=sub_dist.index, values=sub_dist.values, hole=0.4,
         marker=dict(colors=px.colors.qualitative.Set3[:len(sub_dist)])
@@ -373,14 +434,17 @@ def create_sub_persona_chart(df: pd.DataFrame):
     return fig
 
 def create_device_distribution(df: pd.DataFrame):
-    device_dist = df.drop_duplicates('CustomerID')['Device_Category'].value_counts()
-    total = device_dist.sum() if device_dist.sum() else 1
+    base = df.drop_duplicates("CustomerID")
+    if "Device_Category" not in base.columns or base.empty:
+        return go.Figure()
+    device_dist = base["Device_Category"].value_counts()
+    total = device_dist.sum() or 1
     percentages = (device_dist / total * 100).round(1)
     fig = go.Figure(data=[go.Bar(
         x=device_dist.index, y=device_dist.values,
-        marker_color=['#1A73E8', '#4285F4', '#669DF6', '#AECBFA'][:len(device_dist)],
+        marker_color=["#1A73E8", "#4285F4", "#669DF6", "#AECBFA"][:len(device_dist)],
         text=[f"{device_dist[cat]}<br>({percentages[cat]}%)" for cat in device_dist.index],
-        textposition='auto'
+        textposition="auto"
     )])
     fig.update_layout(
         title="Device Category Distribution", xaxis_title="Device Category", yaxis_title="Number of Customers",
@@ -389,16 +453,20 @@ def create_device_distribution(df: pd.DataFrame):
     return fig
 
 def create_persona_matrix(df: pd.DataFrame):
+    if not {"Liquidity_Persona", "Consumption_Persona"}.issubset(df.columns):
+        return go.Figure()
     persona_counts = (
-        df.drop_duplicates('CustomerID')
-          .groupby(['Liquidity_Persona', 'Consumption_Persona'], observed=False)
+        df.drop_duplicates("CustomerID")
+          .groupby(["Liquidity_Persona", "Consumption_Persona"], observed=False)
           .size()
-          .reset_index(name='Count')
+          .reset_index(name="Count")
     )
-    persona_pivot = persona_counts.pivot(index='Liquidity_Persona', columns='Consumption_Persona', values='Count').fillna(0)
+    if persona_counts.empty:
+        return go.Figure()
+    persona_pivot = persona_counts.pivot(index="Liquidity_Persona", columns="Consumption_Persona", values="Count").fillna(0)
     fig = go.Figure(data=go.Heatmap(
         z=persona_pivot.values, x=persona_pivot.columns, y=persona_pivot.index,
-        colorscale='Blues', text=persona_pivot.values.astype(int), texttemplate='%{text}',
+        colorscale="Blues", text=persona_pivot.values.astype(int), texttemplate="%{text}",
         textfont={"size": 12}, colorbar=dict(title="Customer Count")
     ))
     fig.update_layout(
@@ -408,24 +476,26 @@ def create_persona_matrix(df: pd.DataFrame):
     return fig
 
 def create_persona_lift_heatmap(df: pd.DataFrame):
+    if not {"Liquidity_Persona", "Consumption_Persona", "Price_Difference"}.issubset(df.columns):
+        return go.Figure()
     persona_lift = (
-        df.groupby(['Liquidity_Persona', 'Consumption_Persona'], observed=False)['Price_Difference']
+        df.groupby(["Liquidity_Persona", "Consumption_Persona"], observed=False)["Price_Difference"]
           .mean()
           .reset_index()
     )
-    persona_pivot = persona_lift.pivot(index='Liquidity_Persona', columns='Consumption_Persona', values='Price_Difference')
+    persona_pivot = persona_lift.pivot(index="Liquidity_Persona", columns="Consumption_Persona", values="Price_Difference")
     values_flat = persona_pivot.values.flatten()
     values_flat = values_flat[~np.isnan(values_flat)]
     if len(values_flat) > 0:
-        vmin = np.percentile(values_flat, 5)
-        vmax = np.percentile(values_flat, 95)
+        vmin = float(np.percentile(values_flat, 5))
+        vmax = float(np.percentile(values_flat, 95))
     else:
-        vmin, vmax = 0, 10
+        vmin, vmax = 0.0, 10.0
     fig = go.Figure(data=go.Heatmap(
         z=persona_pivot.values, x=persona_pivot.columns, y=persona_pivot.index,
-        colorscale=[[0, '#FF4444'], [0.25, '#FFB6B6'], [0.5, '#FFFFFF'], [0.75, '#B6FFB6'], [1, '#44FF44']],
+        colorscale=[[0, "#FF4444"], [0.25, "#FFB6B6"], [0.5, "#FFFFFF"], [0.75, "#B6FFB6"], [1, "#44FF44"]],
         zmid=0, zmin=vmin, zmax=vmax,
-        text=np.round(persona_pivot.values, 2), texttemplate='$%{text}', textfont={"size": 10},
+        text=np.round(persona_pivot.values, 2), texttemplate="$%{text}", textfont={"size": 10},
         colorbar=dict(title="Avg ARPU Lift ($)")
     ))
     fig.update_layout(
@@ -435,47 +505,67 @@ def create_persona_lift_heatmap(df: pd.DataFrame):
     return fig
 
 def calculate_persona_metrics(df: pd.DataFrame, liquidity=None, consumption=None):
-    filtered_df = df.copy()
-    if liquidity and liquidity != "All":
-        filtered_df = filtered_df[filtered_df['Liquidity_Persona'] == liquidity]
-    if consumption and consumption != "All":
-        filtered_df = filtered_df[filtered_df['Consumption_Persona'] == consumption]
+    filtered_df = df
+    if liquidity and liquidity != "All" and "Liquidity_Persona" in df.columns:
+        filtered_df = filtered_df[filtered_df["Liquidity_Persona"] == liquidity]
+    if consumption and consumption != "All" and "Consumption_Persona" in df.columns:
+        filtered_df = filtered_df[filtered_df["Consumption_Persona"] == consumption]
 
-    unique_customers = filtered_df.drop_duplicates('CustomerID')
+    if filtered_df.empty:
+        return {
+            "total_customers": 0, "total_annual_mbs": 0.0, "avg_annual_mbs": 0.0,
+            "total_voice": 0.0, "avg_voice": 0.0, "total_annual_spend": 0.0,
+            "avg_monthly_spend": 0.0, "spend_volatility": 0.0,
+            "arpu_lift_sum": 0.0, "arpu_pct_of_total": 0.0, "arpu_lift_pct_of_total": 0.0,
+            "total_data_to_voice": 0.0, "avg_data_to_voice": 0.0
+        }, {}, {}
 
-    metrics = {
-        'total_customers': unique_customers.shape[0],
-        'total_annual_mbs': filtered_df['MB_CONSUMPTION'].sum() if 'MB_CONSUMPTION' in filtered_df.columns else 0.0,
-        'avg_annual_mbs': filtered_df.groupby('CustomerID', observed=False)['MB_CONSUMPTION'].sum().mean()
-                          if 'MB_CONSUMPTION' in filtered_df.columns and not filtered_df.empty else 0.0,
-        'total_voice': filtered_df['MINUTES'].sum() if 'MINUTES' in filtered_df.columns else 0.0,
-        'avg_voice': filtered_df.groupby('CustomerID', observed=False)['MINUTES'].sum().mean()
-                      if 'MINUTES' in filtered_df.columns and not filtered_df.empty else 0.0,
-        'total_annual_spend': filtered_df['ARPU'].sum() if 'ARPU' in filtered_df.columns else 0.0,
-        'avg_monthly_spend': filtered_df.groupby('CustomerID', observed=False)['ARPU'].mean().mean()
-                              if 'ARPU' in filtered_df.columns and not filtered_df.empty else 0.0,
-        'spend_volatility': filtered_df.groupby('CustomerID', observed=False)['ARPU'].std().mean()
-                            if 'ARPU' in filtered_df.columns and not filtered_df.empty else 0.0,
-        'arpu_lift_sum': filtered_df['Price_Difference'].sum() if 'Price_Difference' in filtered_df.columns else 0.0,
-        'arpu_pct_of_total': 0.0,
-        'arpu_lift_pct_of_total': 0.0,
-    }
+    unique_customers = filtered_df.drop_duplicates("CustomerID")
 
-    total_data = metrics['total_annual_mbs']
-    total_voice = metrics['total_voice']
+    def _safe_group_mean(col, agg="mean"):
+        if col in filtered_df.columns:
+            g = filtered_df.groupby("CustomerID", observed=False)[col]
+            return getattr(g, "sum" if agg == "sum" else "mean")().mean()
+        return 0.0
+
+    total_annual_mbs = float(filtered_df["MB_CONSUMPTION"].sum()) if "MB_CONSUMPTION" in filtered_df.columns else 0.0
+    avg_annual_mbs = _safe_group_mean("MB_CONSUMPTION", agg="sum")
+    total_voice = float(filtered_df["MINUTES"].sum()) if "MINUTES" in filtered_df.columns else 0.0
+    avg_voice = _safe_group_mean("MINUTES", agg="sum")
+    total_annual_spend = float(filtered_df["ARPU"].sum()) if "ARPU" in filtered_df.columns else 0.0
+    avg_monthly_spend = _safe_group_mean("ARPU", agg="mean")
+    spend_volatility = (filtered_df.groupby("CustomerID", observed=False)["ARPU"].std().mean()
+                        if "ARPU" in filtered_df.columns and not filtered_df.empty else 0.0)
+    arpu_lift_sum = float(filtered_df["Price_Difference"].sum()) if "Price_Difference" in filtered_df.columns else 0.0
+
+    # Data/voice ratios
     if total_voice > 0:
-        metrics['total_data_to_voice'] = total_data / total_voice
-        metrics['avg_data_to_voice'] = filtered_df.apply(
-            lambda row: (row['MB_CONSUMPTION'] / row['MINUTES']) if row.get('MINUTES', 0) > 0 else 0,
-            axis=1
+        total_data_to_voice = total_annual_mbs / total_voice
+        avg_data_to_voice = filtered_df.apply(
+            lambda row: (row["MB_CONSUMPTION"] / row["MINUTES"]) if row.get("MINUTES", 0) else 0, axis=1
         ).mean()
     else:
-        metrics['total_data_to_voice'] = 0.0
-        metrics['avg_data_to_voice'] = 0.0
+        total_data_to_voice = 0.0
+        avg_data_to_voice = 0.0
 
-    device_comp = unique_customers['Device_Category'].value_counts().to_dict() if 'Device_Category' in unique_customers.columns else {}
-    sub_persona_comp = unique_customers['Sub_Persona'].value_counts().head(10).to_dict() if 'Sub_Persona' in unique_customers.columns else {}
+    device_comp = unique_customers["Device_Category"].value_counts().to_dict() if "Device_Category" in unique_customers.columns else {}
+    sub_persona_comp = unique_customers["Sub_Persona"].value_counts().head(10).to_dict() if "Sub_Persona" in unique_customers.columns else {}
 
+    metrics = {
+        "total_customers": int(unique_customers.shape[0]),
+        "total_annual_mbs": total_annual_mbs,
+        "avg_annual_mbs": float(avg_annual_mbs),
+        "total_voice": total_voice,
+        "avg_voice": float(avg_voice),
+        "total_annual_spend": total_annual_spend,
+        "avg_monthly_spend": float(avg_monthly_spend),
+        "spend_volatility": float(spend_volatility),
+        "arpu_lift_sum": arpu_lift_sum,
+        "arpu_pct_of_total": 0.0,
+        "arpu_lift_pct_of_total": 0.0,
+        "total_data_to_voice": float(total_data_to_voice),
+        "avg_data_to_voice": float(avg_data_to_voice),
+    }
     return metrics, device_comp, sub_persona_comp
 
 # =============================================================================
@@ -498,99 +588,101 @@ def main():
         st.title("RECOMMENDATION ENGINE DASHBOARD")
         st.markdown("*Personalized Offer Optimization Platform using 2-Way Clustering*")
 
-    # Load data (cloud)
+    # Load data
     with st.spinner("Loading data..."):
         df = load_data()
-
     if df is None or df.empty:
-        st.error("Failed to load data from Google Drive. Make sure the file is shared (Anyone with the link can view), then click Rerun.")
+        st.error("Failed to load data from Google Drive. Ensure sharing is 'Anyone with the link can view', then click Rerun.")
         st.stop()
 
     # Sidebar filters
     st.sidebar.header("🔍 Filters")
-    customer_type_options = ["All"] + sorted(df['Customer_Type'].dropna().unique().tolist()) if 'Customer_Type' in df.columns else ["All"]
+    customer_type_options = ["All"] + (sorted(df["Customer_Type"].dropna().unique().tolist())
+                                       if "Customer_Type" in df.columns else [])
     selected_customer_type = st.sidebar.selectbox("Customer Type", customer_type_options, index=0)
 
-    liquidity_options = ["All"] + sorted(df['Liquidity_Persona'].dropna().unique().tolist()) if 'Liquidity_Persona' in df.columns else ["All"]
+    liquidity_options = ["All"] + (sorted(df["Liquidity_Persona"].dropna().unique().tolist())
+                                   if "Liquidity_Persona" in df.columns else [])
     selected_liquidity = st.sidebar.selectbox("Liquidity Persona", liquidity_options, index=0)
 
-    consumption_options = ["All"] + sorted(df['Consumption_Persona'].dropna().unique().tolist()) if 'Consumption_Persona' in df.columns else ["All"]
+    consumption_options = ["All"] + (sorted(df["Consumption_Persona"].dropna().unique().tolist())
+                                     if "Consumption_Persona" in df.columns else [])
     selected_consumption = st.sidebar.selectbox("Consumption Persona", consumption_options, index=0)
 
     selected_month = st.sidebar.slider("Select Month", min_value=1, max_value=12, value=12, format="%d")
     st.sidebar.markdown(f"**Selected:** {MONTH_NAMES[selected_month]}")
 
-    # Apply filters
-    filtered_df = df.copy()
-    if selected_customer_type != "All" and 'Customer_Type' in df.columns:
-        filtered_df = filtered_df[filtered_df['Customer_Type'] == selected_customer_type]
-    if selected_liquidity != "All" and 'Liquidity_Persona' in df.columns:
-        filtered_df = filtered_df[filtered_df['Liquidity_Persona'] == selected_liquidity]
-    if selected_consumption != "All" and 'Consumption_Persona' in df.columns:
-        filtered_df = filtered_df[filtered_df['Consumption_Persona'] == selected_consumption]
+    # Apply filters (no copies if possible thanks to CoW)
+    filtered_df = df
+    if selected_customer_type != "All" and "Customer_Type" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["Customer_Type"] == selected_customer_type]
+    if selected_liquidity != "All" and "Liquidity_Persona" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["Liquidity_Persona"] == selected_liquidity]
+    if selected_consumption != "All" and "Consumption_Persona" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["Consumption_Persona"] == selected_consumption]
 
     # Metrics
     metrics = create_kpi_metrics(filtered_df, selected_month)
-    total_company_arpu = df['ARPU'].sum() if 'ARPU' in df.columns else 0.0
-    total_company_projected = (df['ARPU'] + df['Price_Difference']).sum() if {'ARPU','Price_Difference'}.issubset(df.columns) else 0.0
+    total_company_arpu = df["ARPU"].sum() if "ARPU" in df.columns else 0.0
+    total_company_projected = (df["ARPU"] + df["Price_Difference"]).sum() if {"ARPU","Price_Difference"}.issubset(df.columns) else 0.0
 
     # Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Recommendation Overview", "🔍 Customer Explorer", "📈 Analytics", "🎯 Persona Deep Dive", "📋 Offer Catalog"
     ])
 
-    # --- Tab 1
+    # --- Tab 1: Overview
     with tab1:
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Customers", f"{metrics['total_customers']:,}")
-        col2.metric("Total Annual ARPU", f"${metrics['total_arpu']:,.0f}")
-        col3.metric("Projected Total ARPU Lift", f"${metrics['total_lift']:,.0f}",
-                    delta=f"{metrics['positive_lift_pct']:.1f}% positive", delta_color="normal")
-        col4.metric("Avg ARPU Lift per Customer", f"${metrics['avg_lift']:.2f}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Customers", f"{metrics['total_customers']:,}")
+        c2.metric("Total Annual ARPU", f"${metrics['total_arpu']:,.0f}")
+        c3.metric("Projected Total ARPU Lift", f"${metrics['total_lift']:,.0f}",
+                  delta=f"{metrics['positive_lift_pct']:.1f}% positive", delta_color="normal")
+        c4.metric("Avg ARPU Lift per Customer", f"${metrics['avg_lift']:.2f}")
 
         st.markdown("---")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric(f"ARPU - {MONTH_ABBR[selected_month]}", f"${metrics['month_arpu']:,.0f}")
-        col2.metric(f"Projected - {MONTH_ABBR[selected_month]}", f"${metrics['month_projected']:,.0f}",
-                    delta=f"+${metrics['month_projected'] - metrics['month_arpu']:,.0f}", delta_color="normal")
-        month_df = filtered_df[filtered_df['MONTH'] == selected_month] if 'MONTH' in filtered_df.columns else pd.DataFrame()
-        active_customers = month_df['CustomerID'].nunique() if 'CustomerID' in month_df.columns else 0
-        col3.metric(f"Active Customers - {MONTH_ABBR[selected_month]}", f"{active_customers:,}")
-        avg_month_lift = month_df['Price_Difference'].mean() if 'Price_Difference' in month_df.columns and not month_df.empty else 0
-        col4.metric(f"Avg Lift - {MONTH_ABBR[selected_month]}", f"${avg_month_lift:.2f}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(f"ARPU - {MONTH_ABBR[selected_month]}", f"${metrics['month_arpu']:,.0f}")
+        c2.metric(f"Projected - {MONTH_ABBR[selected_month]}", f"${metrics['month_projected']:,.0f}",
+                  delta=f"+${metrics['month_projected'] - metrics['month_arpu']:,.0f}", delta_color="normal")
+        month_df = filtered_df[filtered_df["MONTH"] == selected_month] if "MONTH" in filtered_df.columns else pd.DataFrame()
+        active_customers = month_df["CustomerID"].nunique() if "CustomerID" in month_df.columns else 0
+        c3.metric(f"Active Customers - {MONTH_ABBR[selected_month]}", f"{active_customers:,}")
+        avg_month_lift = month_df["Price_Difference"].mean() if "Price_Difference" in month_df.columns and not month_df.empty else 0
+        c4.metric(f"Avg Lift - {MONTH_ABBR[selected_month]}", f"${avg_month_lift:.2f}")
 
         st.markdown("---")
-        c1, c2 = st.columns(2)
-        with c1:
+        a, b = st.columns(2)
+        with a:
             st.plotly_chart(create_arpu_chart(filtered_df, selected_month), use_container_width=True)
-        with c2:
+        with b:
             st.plotly_chart(create_lift_distribution(filtered_df, selected_liquidity, selected_consumption), use_container_width=True)
 
-        c1, c2 = st.columns(2)
-        with c1:
+        a, b = st.columns(2)
+        with a:
             st.plotly_chart(create_persona_matrix(filtered_df), use_container_width=True)
-        with c2:
+        with b:
             st.plotly_chart(create_persona_lift_heatmap(filtered_df), use_container_width=True)
 
-        c1, c2 = st.columns(2)
-        with c1:
+        a, b = st.columns(2)
+        with a:
             persona_type = st.selectbox("Select Persona View", ["Liquidity_Persona", "Consumption_Persona"], label_visibility="collapsed")
             st.plotly_chart(create_persona_distribution(filtered_df, persona_type), use_container_width=True)
-        with c2:
+        with b:
             st.plotly_chart(create_device_distribution(filtered_df), use_container_width=True)
 
-        c1, c2 = st.columns(2)
-        with c1:
+        a, b = st.columns(2)
+        with a:
             st.plotly_chart(create_sub_persona_chart(filtered_df), use_container_width=True)
-        with c2:
+        with b:
             st.markdown("### 📊 Quick Insights")
             try:
-                top_sub_persona = filtered_df.drop_duplicates('CustomerID')['Sub_Persona'].value_counts().index[0]
+                top_sub_persona = filtered_df.drop_duplicates("CustomerID")["Sub_Persona"].value_counts().index[0]
             except Exception:
                 top_sub_persona = "N/A"
-            avg_consumption = filtered_df['MB_CONSUMPTION'].mean() if 'MB_CONSUMPTION' in filtered_df.columns else 0
+            avg_consumption = filtered_df["MB_CONSUMPTION"].mean() if "MB_CONSUMPTION" in filtered_df.columns else 0
             try:
-                top_device = filtered_df.drop_duplicates('CustomerID')['Device_Category'].value_counts().index[0]
+                top_device = filtered_df.drop_duplicates("CustomerID")["Device_Category"].value_counts().index[0]
             except Exception:
                 top_device = "N/A"
             st.info(f"""
@@ -602,35 +694,42 @@ def main():
 - Total projected ARPU increase: **${metrics['total_lift']:,.0f}**
 """)
 
-    # --- Tab 2
+    # --- Tab 2: Customer Explorer (hardened + memory-light)
     with tab2:
         st.markdown("### 🔍 Customer Explorer")
         col_left, col_right = st.columns([1, 3])
 
         with col_left:
             st.markdown("#### Search & Filter")
+
             search_term = st.text_input("Search Customer ID", placeholder="Enter Customer ID...")
+
             explorer_customer_type = st.selectbox(
                 "Customer Type",
-                ["All"] + sorted(filtered_df['Customer_Type'].dropna().unique().tolist())
-                if 'Customer_Type' in filtered_df.columns else ["All"],
+                ["All"] + (sorted(filtered_df["Customer_Type"].dropna().unique().tolist())
+                           if "Customer_Type" in filtered_df.columns else []),
                 key="explorer_customer_type",
             )
             explorer_device = st.selectbox(
                 "Device Category",
-                ["All"] + sorted(filtered_df['Device_Category'].dropna().unique().tolist())
-                if 'Device_Category' in filtered_df.columns else ["All"]
+                ["All"] + (sorted(filtered_df["Device_Category"].dropna().unique().tolist())
+                           if "Device_Category" in filtered_df.columns else [])
             )
 
-            explorer_df = filtered_df.copy()
-            if explorer_customer_type != "All" and 'Customer_Type' in explorer_df.columns:
-                explorer_df = explorer_df[explorer_df['Customer_Type'] == explorer_customer_type]
-            if explorer_device != "All" and 'Device_Category' in explorer_df.columns:
-                explorer_df = explorer_df[explorer_df['Device_Category'] == explorer_device]
+            explorer_df = filtered_df
+            if explorer_customer_type != "All" and "Customer_Type" in explorer_df.columns:
+                explorer_df = explorer_df[explorer_df["Customer_Type"] == explorer_customer_type]
+            if explorer_device != "All" and "Device_Category" in explorer_df.columns:
+                explorer_df = explorer_df[explorer_df["Device_Category"] == explorer_device]
 
-            all_customer_ids = sorted(explorer_df['CustomerID'].dropna().unique()) if 'CustomerID' in explorer_df.columns else []
+            if "CustomerID" in explorer_df.columns:
+                all_customer_ids = sorted(map(str, explorer_df["CustomerID"].dropna().unique()))
+            else:
+                all_customer_ids = []
+
             if search_term:
-                filtered_customer_ids = [cid for cid in all_customer_ids if search_term.lower() in str(cid).lower()]
+                q = search_term.lower()
+                filtered_customer_ids = [cid for cid in all_customer_ids if q in cid.lower()]
             else:
                 filtered_customer_ids = all_customer_ids
 
@@ -638,135 +737,179 @@ def main():
             items_per_page = 50
             total_filtered = len(filtered_customer_ids)
             total_pages = max(1, (total_filtered + items_per_page - 1) // items_per_page)
+
+            if "explorer_page" not in st.session_state:
+                st.session_state.explorer_page = 1
+            st.session_state.explorer_page = min(max(1, st.session_state.explorer_page), total_pages)
+
             page_col1, page_col2, page_col3 = st.columns([1, 2, 1])
             with page_col2:
-                current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1,
-                                               label_visibility="collapsed") if total_pages > 1 else 1
-            start_idx = (current_page - 1) * items_per_page
+                current_page = st.number_input(
+                    "Page",
+                    min_value=1,
+                    max_value=total_pages,
+                    value=st.session_state.explorer_page,
+                    step=1,
+                    label_visibility="collapsed",
+                    key="explorer_page_input",
+                )
+            if current_page != st.session_state.explorer_page:
+                st.session_state.explorer_page = int(current_page)
+
+            start_idx = (st.session_state.explorer_page - 1) * items_per_page
             end_idx = min(start_idx + items_per_page, total_filtered)
             page_customer_ids = filtered_customer_ids[start_idx:end_idx]
 
+            selected_customer = None
             if page_customer_ids:
-                selected_customer = st.selectbox("Select Customer", page_customer_ids,
-                                                 label_visibility="collapsed", key=f"customer_select_{current_page}")
+                selected_customer = st.selectbox(
+                    "Select Customer",
+                    page_customer_ids,
+                    key="customer_select",       # stable key (prevents state clashes)
+                    label_visibility="collapsed",
+                )
             else:
-                selected_customer = None
                 st.warning("No customers found matching the search criteria")
 
             if search_term:
                 st.info(f"Found {total_filtered:,} customers matching '{search_term}'")
                 if total_pages > 1:
-                    st.info(f"Page {current_page} of {total_pages} | Showing {start_idx+1}-{end_idx} of {total_filtered:,}")
+                    st.info(f"Page {st.session_state.explorer_page} of {total_pages} | "
+                            f"Showing {start_idx+1}-{end_idx} of {total_filtered:,}")
             else:
                 st.info(f"Total: {len(all_customer_ids):,} customers")
                 if total_pages > 1:
-                    st.info(f"Page {current_page} of {total_pages} | Showing {start_idx+1}-{end_idx}")
+                    st.info(f"Page {st.session_state.explorer_page} of {total_pages} | "
+                            f"Showing {start_idx+1}-{end_idx}")
 
         with col_right:
-            if selected_customer:
-                cust_data = explorer_df[
-                    (explorer_df['CustomerID'] == selected_customer) &
-                    (explorer_df['MONTH'] == selected_month)
-                ] if {'CustomerID','MONTH'}.issubset(explorer_df.columns) else pd.DataFrame()
-
-                if not cust_data.empty:
-                    row = cust_data.iloc[0]
-                    st.markdown(f"### Customer: {selected_customer}")
-                    cA, cB, cC, cD = st.columns(4)
-                    cA.markdown(f"**Type:** {row.get('Customer_Type', 'N/A')}")
-                    cB.markdown(f"**Liquidity:** {row.get('Liquidity_Persona', 'N/A')}")
-                    cC.markdown(f"**Consumption:** {row.get('Consumption_Persona', 'N/A')}")
-                    cD.markdown(f"**Sub-Persona:** {row.get('Sub_Persona', 'N/A')}")
-
-                    st.markdown("---")
-                    st.markdown(f"#### Current Status - {MONTH_NAMES[selected_month]}")
-                    cA, cB = st.columns(2)
-                    with cA:
-                        current_offers = row.get('offer_pattern_str', 'None')
-                        st.markdown(f"**Current Offers:** {current_offers}")
-                        mb_consumption = row.get('MB_CONSUMPTION', 0)
-                        mb_allowance = row.get('mb_allowance', 0)
-                        mb_usage_pct = row.get('mb_usage_pct', 0)
-                        st.markdown(f"**Data Usage:** {mb_consumption:,.0f} MB / {mb_allowance:,.0f} MB ({mb_usage_pct:.1f}%)")
-                    with cB:
-                        arpu = row.get('ARPU', 0)
-                        st.markdown(f"**Current ARPU:** ${arpu:.2f}")
-                        minutes = row.get('MINUTES', 0)
-                        st.markdown(f"**Voice Minutes:** {minutes:,.0f}")
-
-                    st.markdown("---")
-                    st.markdown("#### Recommendation")
-                    recommended = row.get('recommended_offers_str', 'None')
-                    if recommended and recommended != "None":
-                        st.success(f"**Recommended Plan:** {recommended}")
+            try:
+                if selected_customer:
+                    if {"CustomerID"}.issubset(explorer_df.columns):
+                        cust_mask = (explorer_df["CustomerID"].astype(str) == str(selected_customer))
+                        if "MONTH" in explorer_df.columns:
+                            cust_mask &= (explorer_df["MONTH"] == selected_month)
+                        cust_data = explorer_df.loc[cust_mask]
                     else:
-                        st.warning("**No recommendation available**")
+                        cust_data = pd.DataFrame()
 
-                    cA, cB = st.columns(2)
-                    price_diff = row.get('Price_Difference', 0)
-                    color = "green" if price_diff > 0 else "red" if price_diff < 0 else "gray"
-                    cA.markdown(f"**ARPU Lift:** <span style='color:{color}; font-weight:bold;'>${price_diff:.2f}</span>", unsafe_allow_html=True)
-                    new_price = row.get('Recommended_Offer_Price', 0)
-                    cB.markdown(f"**New Price:** ${new_price:.2f}")
+                    if cust_data.empty:
+                        st.warning(f"No data available for customer {selected_customer} in {MONTH_NAMES[selected_month]}")
+                    else:
+                        row = cust_data.iloc[0]
 
-                    message = row.get('Message_English', '')
-                    if message:
-                        st.info(f"📱 {message}")
+                        st.markdown(f"### Customer: {selected_customer}")
+                        cA, cB, cC, cD = st.columns(4)
+                        cA.markdown(f"**Type:** {row.get('Customer_Type', 'N/A')}")
+                        cB.markdown(f"**Liquidity:** {row.get('Liquidity_Persona', 'N/A')}")
+                        cC.markdown(f"**Consumption:** {row.get('Consumption_Persona', 'N/A')}")
+                        cD.markdown(f"**Sub-Persona:** {row.get('Sub_Persona', 'N/A')}")
 
-                    st.markdown("---")
-                    st.markdown("#### Customer History (All Months)")
-                    cust_history = explorer_df[explorer_df['CustomerID'] == selected_customer].sort_values('MONTH') \
-                                   if 'MONTH' in explorer_df.columns else explorer_df.iloc[0:0]
-                    fig = go.Figure()
-                    if not cust_history.empty:
-                        fig.add_trace(go.Scatter(
-                            x=cust_history['MONTH'].map(MONTH_ABBR), y=cust_history['ARPU'],
-                            mode='lines+markers', name='Actual ARPU',
-                            line=dict(color='#1A73E8', width=2)
-                        ))
-                        fig.add_trace(go.Scatter(
-                            x=cust_history['MONTH'].map(MONTH_ABBR),
-                            y=cust_history['ARPU'] + cust_history['Price_Difference'],
-                            mode='lines+markers', name='Potential ARPU',
-                            line=dict(color='#25D366', width=2, dash='dash')
-                        ))
-                    fig.update_layout(title="Customer ARPU Trend", height=300, template="plotly_white", showlegend=True)
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning(f"No data available for customer {selected_customer} in {MONTH_NAMES[selected_month]}")
+                        st.markdown("---")
+                        st.markdown(f"#### Current Status - {MONTH_NAMES[selected_month]}")
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            current_offers = row.get("offer_pattern_str", "None")
+                            st.markdown(f"**Current Offers:** {current_offers}")
+                            mb_consumption = row.get("MB_CONSUMPTION", 0) or 0
+                            mb_allowance   = row.get("mb_allowance", 0) or 0
+                            mb_usage_pct   = row.get("mb_usage_pct", 0) or 0
+                            st.markdown(f"**Data Usage:** {mb_consumption:,.0f} MB / {mb_allowance:,.0f} MB ({mb_usage_pct:.1f}%)")
+                        with c2:
+                            arpu = row.get("ARPU", 0) or 0
+                            st.markdown(f"**Current ARPU:** ${arpu:.2f}")
+                            minutes = row.get("MINUTES", 0) or 0
+                            st.markdown(f"**Voice Minutes:** {minutes:,.0f}")
 
-    # --- Tab 3
+                        st.markdown("---")
+                        st.markdown("#### Recommendation")
+                        recommended = row.get("recommended_offers_str", "None")
+                        if recommended and recommended != "None":
+                            st.success(f"**Recommended Plan:** {recommended}")
+                        else:
+                            st.warning("**No recommendation available**")
+
+                        c1, c2 = st.columns(2)
+                        price_diff = row.get("Price_Difference", 0) or 0
+                        color = "green" if price_diff > 0 else "red" if price_diff < 0 else "gray"
+                        c1.markdown(
+                            f"**ARPU Lift:** <span style='color:{color}; font-weight:bold;'>${price_diff:.2f}</span>",
+                            unsafe_allow_html=True
+                        )
+                        new_price = row.get("Recommended_Offer_Price", 0) or 0
+                        c2.markdown(f"**New Price:** ${new_price:.2f}")
+
+                        message = row.get("Message_English", "")
+                        if isinstance(message, str) and message.strip():
+                            st.info(f"📱 {message}")
+
+                        st.markdown("---")
+                        st.markdown("#### Customer History (All Months)")
+                        if {"CustomerID","MONTH","ARPU","Price_Difference"}.issubset(explorer_df.columns):
+                            cust_history = explorer_df[explorer_df["CustomerID"].astype(str) == str(selected_customer)] \
+                                            .sort_values("MONTH")
+                            fig = go.Figure()
+                            if not cust_history.empty:
+                                fig.add_trace(go.Scatter(
+                                    x=cust_history["MONTH"].map(MONTH_ABBR),
+                                    y=cust_history["ARPU"],
+                                    mode="lines+markers", name="Actual ARPU",
+                                    line=dict(color="#1A73E8", width=2)
+                                ))
+                                fig.add_trace(go.Scatter(
+                                    x=cust_history["MONTH"].map(MONTH_ABBR),
+                                    y=cust_history["ARPU"] + cust_history["Price_Difference"],
+                                    mode="lines+markers", name="Potential ARPU",
+                                    line=dict(color="#25D366", width=2, dash="dash")
+                                ))
+                            fig.update_layout(title="Customer ARPU Trend", height=300, template="plotly_white", showlegend=True)
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("Not enough columns to draw history.")
+            except Exception as e:
+                st.error("Customer Explorer hit an error. Details below:")
+                st.exception(e)
+
+    # --- Tab 3: Analytics (use memory-light masks)
     with tab3:
         st.markdown("### 📈 Advanced Analytics")
         st.markdown("#### Offer Migration Analysis")
 
-        current_offers_filtered = filtered_df[
-            ~filtered_df['offer_pattern_str'].isin(['None'])
-        ]['offer_pattern_str'].value_counts().head(10) if 'offer_pattern_str' in filtered_df.columns else pd.Series(dtype=int)
+        current_offers_filtered = (
+            filtered_df.loc[filtered_df["offer_pattern_str"] != "None", "offer_pattern_str"]
+            .value_counts()
+            .head(10)
+            if "offer_pattern_str" in filtered_df.columns else pd.Series(dtype=int)
+        )
 
-        recommended_offers_filtered = filtered_df[
-            filtered_df['recommended_offers_norm'].apply(lambda x: len(x) > 0) if 'recommended_offers_norm' in filtered_df.columns else False
-        ]['recommended_offers_str'].value_counts().head(10) if 'recommended_offers_str' in filtered_df.columns else pd.Series(dtype=int)
+        if "recommended_has" in filtered_df.columns and "recommended_offers_str" in filtered_df.columns:
+            recommended_offers_filtered = (
+                filtered_df.loc[filtered_df["recommended_has"], "recommended_offers_str"]
+                .value_counts()
+                .head(10)
+            )
+        else:
+            recommended_offers_filtered = pd.Series(dtype=int)
 
-        c1, c2 = st.columns(2)
-        with c1:
+        a, b = st.columns(2)
+        with a:
             st.markdown("**Top Current Offers**")
             if not current_offers_filtered.empty:
                 fig = go.Figure(data=[go.Bar(
                     y=current_offers_filtered.index, x=current_offers_filtered.values,
-                    orientation='h', marker_color='#4285F4'
+                    orientation="h", marker_color="#4285F4"
                 )])
                 fig.update_layout(height=400, template="plotly_white", xaxis_title="Number of Customers", showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No current offers to display")
 
-        with c2:
+        with b:
             st.markdown("**Top Recommended Offers**")
             if not recommended_offers_filtered.empty:
                 fig = go.Figure(data=[go.Bar(
                     y=recommended_offers_filtered.index, x=recommended_offers_filtered.values,
-                    orientation='h', marker_color='#25D366'
+                    orientation="h", marker_color="#25D366"
                 )])
                 fig.update_layout(height=400, template="plotly_white", xaxis_title="Number of Customers", showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
@@ -775,37 +918,38 @@ def main():
 
         st.markdown("---")
         st.markdown("#### Summary Statistics")
-        c1, c2, c3 = st.columns(3)
-        with c1:
+        a, b, c = st.columns(3)
+        with a:
             st.markdown("**Data Coverage**")
-            total_months = filtered_df['MONTH'].nunique() if 'MONTH' in filtered_df.columns else 0
+            total_months = filtered_df["MONTH"].nunique() if "MONTH" in filtered_df.columns else 0
             total_records = len(filtered_df)
-            avg_records_per_customer = filtered_df.groupby('CustomerID', observed=False).size().mean() if 'CustomerID' in filtered_df.columns and total_records > 0 else 0
+            avg_records_per_customer = (filtered_df.groupby("CustomerID", observed=False).size().mean()
+                                        if "CustomerID" in filtered_df.columns and total_records > 0 else 0)
             st.metric("Total Months", total_months)
             st.metric("Total Records", f"{total_records:,}")
             st.metric("Avg Records/Customer", f"{avg_records_per_customer:.1f}")
 
-        with c2:
+        with b:
             st.markdown("**Recommendation Impact**")
-            no_rec_count = filtered_df['recommended_offers_norm'].apply(lambda x: len(x) == 0).sum() \
-                           if 'recommended_offers_norm' in filtered_df.columns else 0
-            rec_rate = ((len(filtered_df) - no_rec_count) / len(filtered_df) * 100) if len(filtered_df) > 0 else 0
-            positive_lift = (filtered_df['Price_Difference'] > 0).sum() if 'Price_Difference' in filtered_df.columns else 0
+            rec_rate = ((filtered_df["recommended_has"].mean() * 100)
+                        if "recommended_has" in filtered_df.columns and len(filtered_df) > 0 else 0.0)
+            positive_lift = (filtered_df["Price_Difference"] > 0).sum() if "Price_Difference" in filtered_df.columns else 0
+            no_rec_count = int(len(filtered_df) - filtered_df["recommended_has"].sum()) if "recommended_has" in filtered_df.columns else len(filtered_df)
             st.metric("Recommendation Rate", f"{rec_rate:.1f}%")
             st.metric("Positive Lift Cases", f"{positive_lift:,}")
             st.metric("No Recommendation", f"{no_rec_count:,}")
 
-        with c3:
+        with c:
             st.markdown("**Financial Impact**")
-            total_current = filtered_df['ARPU'].sum() if 'ARPU' in filtered_df.columns else 0.0
-            total_recommended = (filtered_df['ARPU'] + filtered_df['Price_Difference']).sum() \
-                                if {'ARPU', 'Price_Difference'}.issubset(filtered_df.columns) else total_current
+            total_current = filtered_df["ARPU"].sum() if "ARPU" in filtered_df.columns else 0.0
+            total_recommended = ((filtered_df["ARPU"] + filtered_df["Price_Difference"]).sum()
+                                 if {"ARPU", "Price_Difference"}.issubset(filtered_df.columns) else total_current)
             growth_rate = ((total_recommended - total_current) / total_current * 100) if total_current > 0 else 0
             st.metric("Current Total ARPU", f"${total_current:,.0f}")
             st.metric("Projected Total ARPU", f"${total_recommended:,.0f}")
             st.metric("Growth Rate", f"{growth_rate:.2f}%")
 
-    # --- Tab 4
+    # --- Tab 4: Persona Deep Dive
     with tab4:
         st.markdown("### 🎯 Persona Deep Dive")
         st.markdown("*Change the filters to explore different persona combinations*")
@@ -813,9 +957,11 @@ def main():
         persona_metrics, device_comp, sub_persona_comp = calculate_persona_metrics(
             filtered_df, selected_liquidity, selected_consumption
         )
-        persona_metrics['arpu_pct_of_total'] = (persona_metrics['total_annual_spend'] / total_company_arpu * 100) if total_company_arpu > 0 else 0
-        persona_metrics['arpu_lift_pct_of_total'] = ((persona_metrics['total_annual_spend'] + persona_metrics['arpu_lift_sum']) / total_company_projected * 100) \
-                                                    if total_company_projected > 0 else 0
+        persona_metrics["arpu_pct_of_total"] = ((persona_metrics["total_annual_spend"] / total_company_arpu * 100)
+                                                if total_company_arpu > 0 else 0.0)
+        persona_metrics["arpu_lift_pct_of_total"] = (((persona_metrics["total_annual_spend"] + persona_metrics["arpu_lift_sum"])
+                                                      / total_company_projected * 100)
+                                                     if total_company_projected > 0 else 0.0)
 
         st.markdown("#### 📊 Key Metrics")
         c1, c2, c3, c4 = st.columns(4)
@@ -836,27 +982,25 @@ def main():
         c4.metric("% of Projected ARPU", f"{persona_metrics['arpu_lift_pct_of_total']:.1f}%")
 
         st.markdown("---")
-        c1, c2 = st.columns(2)
-
-        with c1:
+        a, b = st.columns(2)
+        with a:
             st.markdown("#### 📱 Device Composition")
             if device_comp:
-                device_df = pd.DataFrame(list(device_comp.items()), columns=['Device', 'Count'])
-                device_df['Percentage'] = (device_df['Count'] / device_df['Count'].sum() * 100).round(1)
-                fig = go.Figure(data=[go.Pie(labels=device_df['Device'], values=device_df['Count'],
-                                             hole=0.4, textinfo='label+percent',
+                device_df = pd.DataFrame(list(device_comp.items()), columns=["Device", "Count"])
+                device_df["Percentage"] = (device_df["Count"] / device_df["Count"].sum() * 100).round(1)
+                fig = go.Figure(data=[go.Pie(labels=device_df["Device"], values=device_df["Count"],
+                                             hole=0.4, textinfo="label+percent",
                                              marker=dict(colors=px.colors.qualitative.Set3[:len(device_df)]))])
                 fig.update_layout(height=350, showlegend=True, template="plotly_white")
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No device data available")
-
-        with c2:
+        with b:
             st.markdown("#### 👥 Sub-Persona Composition")
             if sub_persona_comp:
-                sub_df = pd.DataFrame(list(sub_persona_comp.items()), columns=['Sub-Persona', 'Count']).sort_values('Count', ascending=True)
-                fig = go.Figure(data=[go.Bar(y=sub_df['Sub-Persona'], x=sub_df['Count'], orientation='h',
-                                             marker_color='#1A73E8', text=sub_df['Count'], textposition='auto')])
+                sub_df = pd.DataFrame(list(sub_persona_comp.items()), columns=["Sub-Persona", "Count"]).sort_values("Count", ascending=True)
+                fig = go.Figure(data=[go.Bar(y=sub_df["Sub-Persona"], x=sub_df["Count"], orientation="h",
+                                             marker_color="#1A73E8", text=sub_df["Count"], textposition="auto")])
                 fig.update_layout(height=350, xaxis_title="Number of Customers", template="plotly_white", showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -873,19 +1017,19 @@ def main():
             filters_text.append(f"Consumption: **{selected_consumption}**")
         st.info("Current filters: " + " | ".join(filters_text) if filters_text else "Showing data for **All Personas**")
 
-        c1, c2 = st.columns(2)
-        c1.markdown("##### Persona Insights")
-        c1.write(f"- **Avg Data Usage:** {persona_metrics['avg_annual_mbs']/12:.0f} MB/month")
-        c1.write(f"- **Avg Voice Usage:** {persona_metrics['avg_voice']/12:.0f} minutes/month")
-        lift_per_cust = (persona_metrics['arpu_lift_sum']/persona_metrics['total_customers']) if persona_metrics['total_customers'] > 0 else 0.0
-        c2.markdown("##### Business Impact")
-        c2.write(f"- **Revenue Contribution:** {persona_metrics['arpu_pct_of_total']:.1f}% of total ARPU")
-        c2.write(f"- **Growth Potential:** ${persona_metrics['arpu_lift_sum']:,.0f} total lift opportunity")
-        c2.write(f"- **Lift per Customer:** ${lift_per_cust:.2f} average")
-        c2.write(f"- **Customer Base:** {persona_metrics['total_customers']:,} customers")
-        c2.write(f"- **Post-Optimization Share:** {persona_metrics['arpu_lift_pct_of_total']:.1f}% of projected ARPU")
+        a, b = st.columns(2)
+        a.markdown("##### Persona Insights")
+        a.write(f"- **Avg Data Usage:** {persona_metrics['avg_annual_mbs']/12:.0f} MB/month")
+        a.write(f"- **Avg Voice Usage:** {persona_metrics['avg_voice']/12:.0f} minutes/month")
+        lift_per_cust = (persona_metrics["arpu_lift_sum"]/persona_metrics["total_customers"]) if persona_metrics["total_customers"] > 0 else 0.0
+        b.markdown("##### Business Impact")
+        b.write(f"- **Revenue Contribution:** {persona_metrics['arpu_pct_of_total']:.1f}% of total ARPU")
+        b.write(f"- **Growth Potential:** ${persona_metrics['arpu_lift_sum']:,.0f} total lift opportunity")
+        b.write(f"- **Lift per Customer:** ${lift_per_cust:.2f} average")
+        b.write(f"- **Customer Base:** {persona_metrics['total_customers']:,} customers")
+        b.write(f"- **Post-Optimization Share:** {persona_metrics['arpu_lift_pct_of_total']:.1f}% of projected ARPU")
 
-    # --- Tab 5
+    # --- Tab 5: Offer Catalog
     with tab5:
         st.markdown("### 📋 Offer Catalog")
         st.markdown("Browse all available offers organized by category")
@@ -894,8 +1038,8 @@ def main():
             with offer_tabs[i]:
                 st.markdown(f"#### {category}")
                 display_df = df_offers.copy()
-                display_df['Data (GB)'] = (display_df['Data (MB)'] / 1024).round(2)
-                display_df = display_df[['Code', 'Name', 'Type', 'Data (MB)', 'Data (GB)', 'Price ($)', 'Voice']]
+                display_df["Data (GB)"] = (display_df["Data (MB)"] / 1024).round(2)
+                display_df = display_df[["Code", "Name", "Type", "Data (MB)", "Data (GB)", "Price ($)", "Voice"]]
                 st.dataframe(
                     display_df, use_container_width=True, hide_index=True,
                     column_config={
@@ -908,10 +1052,10 @@ def main():
                         "Voice": st.column_config.NumberColumn("Voice Minutes", format="%d"),
                     }
                 )
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Total Offers", len(display_df))
-                c2.metric("Avg Price", f"${display_df['Price ($)'].mean():.2f}")
-                c3.metric("Avg Data", f"{display_df['Data (MB)'].mean():,.0f} MB")
+                a, b, c = st.columns(3)
+                a.metric("Total Offers", len(display_df))
+                b.metric("Avg Price", f"${display_df['Price ($)'].mean():.2f}")
+                c.metric("Avg Data", f"{display_df['Data (MB)'].mean():,.0f} MB")
 
     # Footer
     st.markdown("---")
