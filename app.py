@@ -483,44 +483,47 @@ def create_persona_matrix(df: pd.DataFrame):
     return fig
 
 def create_persona_lift_heatmap(df: pd.DataFrame):
-    """Heatmap with correct values per cell and 2-decimal labels."""
-    if not {"Liquidity_Persona", "Consumption_Persona", "Price_Difference"}.issubset(df.columns):
+    """Heatmap for avg lift using the same 'Blues' colorscale as the customer count matrix."""
+    need = {"Liquidity_Persona", "Consumption_Persona", "Price_Difference"}
+    if not need.issubset(df.columns):
         return go.Figure()
 
+    # Average lift by persona combo
     persona_lift = (
         df.groupby(["Liquidity_Persona", "Consumption_Persona"], observed=False)["Price_Difference"]
           .mean()
           .reset_index()
     )
-    persona_pivot = persona_lift.pivot(index="Liquidity_Persona", columns="Consumption_Persona", values="Price_Difference")
+    persona_pivot = persona_lift.pivot(
+        index="Liquidity_Persona", columns="Consumption_Persona", values="Price_Difference"
+    )
 
-    # Build a string matrix for labels (ensures 2-dec and avoids plotly reformatting)
+    # Pre-format labels to 2 decimals
     text_fmt = persona_pivot.applymap(lambda v: "" if pd.isna(v) else f"{v:.2f}")
 
-    # Percentile-based color scaling to handle outliers
-    values_flat = persona_pivot.values.flatten()
-    values_flat = values_flat[~np.isnan(values_flat)]
-    if len(values_flat) > 0:
-        vmin = float(np.percentile(values_flat, 5))
-        vmax = float(np.percentile(values_flat, 95))
+    # Percentile bounds to tame outliers (same approach, just with a sequential scale)
+    vals = persona_pivot.values.flatten()
+    vals = vals[~np.isnan(vals)]
+    if len(vals) > 0:
+        vmin = float(np.percentile(vals, 5))
+        vmax = float(np.percentile(vals, 95))
+        if vmin == vmax:  # avoid flat colorbar
+            vmin -= 0.01
+            vmax += 0.01
     else:
-        vmin, vmax = 0.0, 10.0
+        vmin, vmax = 0.0, 1.0
 
     fig = go.Figure(data=go.Heatmap(
         z=persona_pivot.values,
         x=persona_pivot.columns,
         y=persona_pivot.index,
-        colorscale=[
-            [0, "#FF4444"], [0.25, "#FFB6B6"], [0.5, "#FFFFFF"],
-            [0.75, "#B6FFB6"], [1, "#44FF44"]
-        ],
-        zmid=0,
+        colorscale="Blues",        # <<< same as the count matrix
         zmin=vmin,
         zmax=vmax,
         text=text_fmt.values,
-        texttemplate="$%{text}",   # uses the pre-formatted strings
-        textfont={"size": 10},
-        colorbar=dict(title="Avg ARPU Lift ($)")
+        texttemplate="$%{text}",
+        textfont={"size": 12},
+        colorbar=dict(title="Avg ARPU Lift ($)", tickformat="$,.2f")
     ))
     fig.update_layout(
         title="Average ARPU Lift by Persona Combination",
